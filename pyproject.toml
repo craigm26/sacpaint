@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sacpaint"
+version = "0.2.0"
+description = "Sacramento PaintBench: draw a fixed Sacramento skyline reference from camera feedback, scored by landmark geometry. An Inspect Robots benchmark."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Craig Merry" }]
+keywords = ["robotics", "benchmark", "inspect-robots", "evaluation", "vision-language-action"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "inspect-robots>=0.58.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/craigm26/sacpaint"
+Issues = "https://github.com/craigm26/sacpaint/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5", "build", "twine"]
+agent = ["inspect-robots-agent>=0.26.0"]
+opencastor = []  # stdlib only; kept as a stable install target
+
+[project.scripts]
+sacpaint = "sacpaint.cli:main"
+sacpaint-claude-shim = "sacpaint.claude_shim.__main__:main"
+
+[project.entry-points."inspect_robots.tasks"]
+"sacpaint/line-v0" = "sacpaint.tasks:line_v0"
+
+[project.entry-points."inspect_robots.embodiments"]
+sacpaint_plotter = "sacpaint.mock:plotter_embodiment"
+opencastor = "sacpaint.opencastor.embodiment:opencastor_embodiment"
+
+[project.entry-points."inspect_robots.policies"]
+sacpaint_trace = "sacpaint.mock:trace_policy"
+sacpaint_idle = "sacpaint.mock:idle_policy"
+
+[project.entry-points."inspect_robots.scorers"]
+sacpaint_landmarks = "sacpaint.scorers:landmark_geometry"
+sacpaint_structure = "sacpaint.scorers:structure"
+sacpaint_discipline = "sacpaint.scorers:discipline"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sacpaint = ["assets/*.png", "assets/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
