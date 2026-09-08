@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sacpaint"
-version = "0.2.0"
+version = "0.2.1"
 description = "Sacramento PaintBench: draw a fixed Sacramento skyline reference from camera feedback, scored by landmark geometry. An Inspect Robots benchmark."
 readme = "README.md"
 license = { text = "MIT" }

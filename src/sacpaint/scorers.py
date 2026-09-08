@@ -129,7 +129,7 @@ def _aligned_presence(
     c_ref, c_can = _centroid(r_box), _centroid(c_box)
     if c_ref is None or c_can is None:
         return 0.0, 0.0, 0.0, c_ref, c_can
-    dx, dy = int(round(c_ref[0] - c_can[0])), int(round(c_ref[1] - c_can[1]))
+    dx, dy = round(c_ref[0] - c_can[0]), round(c_ref[1] - c_can[1])
     shifted = np.zeros_like(c_crop)
     h, w = c_crop.shape
     src_y = slice(max(0, -dy), min(h, h - dy))

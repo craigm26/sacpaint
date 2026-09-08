@@ -204,7 +204,7 @@ def _wait_healthy(port: int, seconds: float = 15.0) -> bool:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as r:
                 if r.status == 200:
                     return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - not up yet, keep polling
             time.sleep(0.25)
     return False
 

@@ -8,7 +8,8 @@ whenever Inspect Robots loads the ``sacpaint/line-v0`` entry point.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from inspect_robots.registry import task
 from inspect_robots.scene import Scene, Target

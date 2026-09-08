@@ -87,13 +87,13 @@ class ReferenceSpec:
 
     def canonical_size(self) -> tuple[int, int]:
         """Canonical image size as (width_px, height_px)."""
-        return int(round(self.canvas_mm[0] * self.px_per_mm)), int(round(self.canvas_mm[1] * self.px_per_mm))
+        return round(self.canvas_mm[0] * self.px_per_mm), round(self.canvas_mm[1] * self.px_per_mm)
 
     def mm_to_px(self, p: Point) -> tuple[int, int]:
         """Canvas-mm point (x right, y up) to image pixel (col, row)."""
         w, h = self.canonical_size()
-        col = int(round(p[0] * self.px_per_mm))
-        row = int(round(h - p[1] * self.px_per_mm))
+        col = round(p[0] * self.px_per_mm)
+        row = round(h - p[1] * self.px_per_mm)
         return min(max(col, 0), w - 1), min(max(row, 0), h - 1)
 
     def render(self, strokes_by_name: dict[str, list[Stroke]] | None = None) -> np.ndarray:
@@ -194,12 +194,12 @@ class ReferenceSpec:
 
 HORIZON_Y = 300.0
 CANOPY_Y = 200.0
-TOWER = dict(x0=125.0, x1=175.0, y0=205.0, y1=290.0, cap_x0=120.0, cap_x1=180.0, cap_y1=298.0)
-DOME = dict(cx=150.0, cy=60.0, r=70.0)
-CUPOLA = dict(x0=135.0, x1=165.0, y0=130.0, y1=165.0, ball_cy=178.0, ball_r=8.0)
-ROAD = dict(left=((112.0, 140.0), (140.0, 205.0)), right=((188.0, 140.0), (160.0, 205.0)))
-LEFT_BUILDING = dict(x0=10.0, x1=70.0, y0=100.0, y1=260.0)
-RIGHT_BUILDING = dict(x0=230.0, x1=290.0, y0=100.0, y1=250.0)
+TOWER = {"x0": 125.0, "x1": 175.0, "y0": 205.0, "y1": 290.0, "cap_x0": 120.0, "cap_x1": 180.0, "cap_y1": 298.0}
+DOME = {"cx": 150.0, "cy": 60.0, "r": 70.0}
+CUPOLA = {"x0": 135.0, "x1": 165.0, "y0": 130.0, "y1": 165.0, "ball_cy": 178.0, "ball_r": 8.0}
+ROAD = {"left": ((112.0, 140.0), (140.0, 205.0)), "right": ((188.0, 140.0), (160.0, 205.0))}
+LEFT_BUILDING = {"x0": 10.0, "x1": 70.0, "y0": 100.0, "y1": 260.0}
+RIGHT_BUILDING = {"x0": 230.0, "x1": 290.0, "y0": 100.0, "y1": 250.0}
 
 
 def sacramento_spec() -> ReferenceSpec:
@@ -282,7 +282,7 @@ def _discover() -> dict[str, ReferenceSpec]:
                 continue  # the built-in is defined in code; the file is a copy for humans
             try:
                 spec = ReferenceSpec.from_dict(json.loads(path.read_text()))
-            except Exception as exc:  # a broken user spec must not hide the others
+            except Exception as exc:  # noqa: BLE001 - a broken user spec must not hide the others
                 import warnings
 
                 warnings.warn(f"ignoring reference spec {path}: {exc}", RuntimeWarning, stacklevel=2)
@@ -306,8 +306,7 @@ def available() -> list[str]:
 def get_spec(name: str = DEFAULT_REFERENCE) -> ReferenceSpec:
     """Look a reference up by name (``.png`` / ``.spec.json`` suffixes tolerated)."""
     for suffix in (".png", SPEC_SUFFIX, ".json"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
+        name = name.removesuffix(suffix)
     try:
         return _discover()[name]
     except KeyError:

@@ -16,7 +16,7 @@ independent of camera pose, lens, and mounting height.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import cv2
 import numpy as np
@@ -32,7 +32,7 @@ class RectifyError(RuntimeError):
     """Raised when no canvas corners can be established or the homography is degenerate."""
 
 
-def _dictionary() -> "cv2.aruco.Dictionary":
+def _dictionary() -> cv2.aruco.Dictionary:
     return cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
 
