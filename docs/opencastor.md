@@ -138,8 +138,8 @@ inspect-robots run \
     -P model=anthropic/claude-fable-5 \
     -E pair_payload=/path/to/pair-payload.json \
     -E calibration=canvas.json \
-    -E overhead_url=http://192.168.68.90:8002/camera/oakd/snapshot \
-    -E corners_url=http://192.168.68.90:8002/canvas/corners \
+    -E overhead_url="http://192.168.68.90:8002/eval/frame/latest?stream=overhead&max_age_s=3" \
+    -E corners_url="http://192.168.68.90:8002/eval/corners?stream=overhead" \
     -E actuator_name=so-arm101 \
     -E move_tool=arm.reach_point \
     -E move_args=reach_point \
@@ -174,6 +174,27 @@ sacpaint run --embodiment opencastor --model anthropic/claude-fable-5 \
 ```
 
 ---
+
+## The iPhone as the overhead camera (OpenCastor iOS build 76, Eval mode)
+
+Open the OpenCastor app, pick the robot, open **Eval**, point the rear camera
+at the sheet, tap **Stream**, then **Mark corners** (TL, TR, BR, BL). The app
+posts JPEG frames and the corners to the robot console; the embodiment polls
+them. Nothing is written to disk on the Pi; frames live in memory, one per
+stream. The console URL is the robot's console port (Bob: 8002) and the token
+is the read-only `CONSOLE_TOKEN` from `~/bob/tokens.env`.
+
+| Purpose | URL |
+|---|---|
+| latest overhead frame (404 when absent or older than `max_age_s`) | `GET /eval/frame/latest?stream=overhead&max_age_s=3` |
+| tapped corners, normalized 0..1 against the posted JPEG, TL TR BR BL | `GET /eval/corners?stream=overhead` |
+| operator speech or typed lines (evidence, not commands) | `GET /eval/feedback?since=0` |
+| the reference the app shows the operator | `GET /eval/reference.png` |
+| one-poll summary, episode reset | `GET /eval/status`, `POST /eval/reset` |
+
+So the two flags are `-E overhead_url="http://<robot>:8002/eval/frame/latest?stream=overhead&max_age_s=3"`
+and `-E corners_url="http://<robot>:8002/eval/corners?stream=overhead"`, with
+`-E camera_token_env=CONSOLE_TOKEN`. Full endpoint doc: `opencastor-runtime/docs/eval-eyes.md`.
 
 ## Every `-E` flag
 

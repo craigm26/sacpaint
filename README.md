@@ -145,7 +145,7 @@ Any embodiment that exposes this contract runs the benchmark unchanged:
 |---|---|
 | Mock plotter (built in) | `--embodiment sacpaint_plotter`, options `-E reference=NAME -E photo_mode=sheet` |
 | OpenCastor + SO-ARM101 with signed receipts | [docs/opencastor.md](docs/opencastor.md): `--embodiment opencastor` |
-| iPhone as the overhead camera and operator microphone | the OpenCastor iOS app's Eval mode, see [docs/opencastor.md](docs/opencastor.md) |
+| iPhone as the overhead camera, corner marker, and operator microphone | the OpenCastor iOS app's Eval mode (TestFlight build 76): frames and tapped corners go to the robot console, the embodiment polls them; see [docs/opencastor.md](docs/opencastor.md) |
 | Any other arm | implement the contract above; `inspect-robots-so101` (LeRobot, joint space) is a fallback body that needs the agent's `move_joints` |
 
 ## Publishing a run the way robocurve does
