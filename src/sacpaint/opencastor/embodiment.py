@@ -278,7 +278,7 @@ class OpenCastorEmbodiment:
         token: str | None = None,
         token_env: str = "ROBOT_MD_TOKEN",
         pair_payload: str | None = None,
-        timeout_s: float = 30.0,
+        timeout_s: float = 90.0,  # a worst-case arm.reach_point (25 servo steps + a walk-back) is ~45 s
         move_tool: str = DEFAULT_MOVE_TOOL,
         state_tool: str | None = DEFAULT_STATE_TOOL,
         home_tool: str = DEFAULT_HOME_TOOL,

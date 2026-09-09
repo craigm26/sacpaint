@@ -245,7 +245,7 @@ and `-E corners_url="http://<robot>:8002/eval/corners?stream=overhead"`, with
 | `token_env` | `ROBOT_MD_TOKEN` | Environment variable to read the bearer from. |
 | `ruri` | `rcan://demo.local/bob` | RCAN resource id. Also settable as `$ROBOT_MD_RURI`. |
 | `actuator_name` | `so-arm101` | Which actuator on a multi-actuator gateway. Omitting it on Bob risks a `422 actuator_name_required`. |
-| `timeout_s` | `30` | Per-invoke HTTP timeout. A long stroke at low speed needs headroom. |
+| `timeout_s` | `90` | Per-invoke HTTP timeout. A long stroke at low speed needs headroom. |
 | `move_tool` | `arm.move_to` | The cartesian tool to call. **Use `arm.reach_point` on an SO-ARM101** — see step 4. |
 | `move_args` | `move_to` | Argument spelling: `move_to` sends `{x_mm, y_mm, z_mm, speed?}`; `reach_point` sends `{target_mm: [x,y,z], tolerance_mm}`. Must match `move_tool`. |
 | `state_tool` | `arm.state` | Tool asked for the tip position at reset; returns `{joint_positions_rad, eef_mm, tool}` under scope `OBSERVE`. Set `-E state_tool=` (empty) on a gateway that has none — the adapter then uses the commanded pose. |
