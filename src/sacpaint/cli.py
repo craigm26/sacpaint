@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from sacpaint import reference as refmod
-from sacpaint.reference import DEFAULT_REFERENCE, SPEC_SUFFIX, ReferenceSpec, get_spec, reference_image, user_reference_dir
+from sacpaint.reference import DEFAULT_REFERENCE, SPEC_SUFFIX, ReferenceSpec, get_spec, reference_ink, user_reference_dir
 
 
 def _load_rgb(path: str) -> np.ndarray:
@@ -76,7 +76,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     result["corners_from"] = how
     out = Path(args.out) if args.out else Path(args.photo).with_suffix("")
     _save_rgb(out.with_name(out.name + "-canvas.png"), canvas)
-    _save_rgb(out.with_name(out.name + "-overlay.png"), overlay(canvas, reference_image(spec.name)))
+    _save_rgb(out.with_name(out.name + "-overlay.png"), overlay(canvas, reference_ink(spec.name)))
     out.with_name(out.name + "-score.json").write_text(json.dumps(result, indent=2, sort_keys=True))
     print(f"reference   {spec.name}")
     print(f"corners     {how}")
@@ -105,8 +105,17 @@ def cmd_new(args: argparse.Namespace) -> int:
         w, h = (float(v) for v in args.canvas.lower().split("x"))
     else:
         w, h = base.canvas_mm
-    spec = ReferenceSpec.from_dict(base.to_dict())
+    spec = ReferenceSpec.from_dict(base.to_dict(), base_dir=dest.parent)
     spec.name = name
+    spec.photo, spec.photo_credit = None, ""  # the base's photograph is its own; pass --photo for yours
+    if args.photo:
+        src = Path(args.photo).expanduser()
+        if not src.is_file():
+            raise SystemExit(f"--photo {src} is not a file")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        photo_dest = dest.parent / f"{name}{src.suffix.lower()}"
+        shutil.copyfile(src, photo_dest)
+        spec.photo, spec.photo_credit = photo_dest.name, args.photo_credit
     if (w, h) != tuple(base.canvas_mm):
         # Scale the copied drawing onto the new sheet so it stays a valid starting point.
         sx, sy = w / base.canvas_mm[0], h / base.canvas_mm[1]
@@ -122,6 +131,9 @@ def cmd_new(args: argparse.Namespace) -> int:
     _save_rgb(dest.with_suffix("").with_suffix(".png"), spec.render())
     print(f"wrote {dest}")
     print(f"preview {dest.with_suffix('').with_suffix('.png')}")
+    if spec.photo:
+        print(f"photo   {spec.photo_path()} (what the model sees; sha256 {spec.sha256()[:12]}...)")
+        print("trace the photo's landmarks as strokes: that skeleton is what the scorers read.")
     print("edit the strokes (mm, origin bottom-left, y up) and landmarks, then:")
     print(f"  sacpaint preview {name}")
     print(f"  sacpaint run --task sacpaint/{name} --policy sacpaint_trace --embodiment sacpaint_plotter")
@@ -133,8 +145,10 @@ def cmd_preview(args: argparse.Namespace) -> int:
     out = Path(args.out) if args.out else Path(f"{spec.name}.png")
     _save_rgb(out, spec.render())
     rub = spec.rubric()
-    print(f"{spec.name}: {spec.canvas_mm[0]:.0f} x {spec.canvas_mm[1]:.0f} mm, {len(spec.strokes)} stroke groups, "
-          f"{len(rub['landmarks'])} scored landmarks, sha256 {spec.sha256()[:12]}...")
+    print(f"{spec.name} ({spec.kind}): {spec.canvas_mm[0]:.0f} x {spec.canvas_mm[1]:.0f} mm, {len(spec.strokes)} stroke groups, "
+          f"{len(rub['landmarks'])} scored landmarks, sha256 {spec.sha256()[:12]}..., ink sha256 {spec.ink_sha256()[:12]}...")
+    if spec.photo:
+        print(f"photo {spec.photo_path()}  (the model sees this; the PNG below is the scoring ink)")
     print(f"wrote {out}")
     return 0
 
@@ -144,7 +158,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     for name in refmod.available():
         spec = get_spec(name)
-        print(f"{task_name_for(name):32s} {spec.canvas_mm[0]:.0f}x{spec.canvas_mm[1]:.0f} mm  {spec.description}")
+        print(f"{task_name_for(name):26s} {spec.kind:5s} {spec.canvas_mm[0]:.0f}x{spec.canvas_mm[1]:.0f} mm  {spec.description}")
     return 0
 
 
@@ -397,13 +411,20 @@ def cmd_export(args: argparse.Namespace) -> int:
         if vid.is_dir():
             shutil.copytree(vid, out / "videos", dirs_exist_ok=True)
     spec = get_spec(args.reference)
-    (out / "reference.png").write_bytes(spec.png_bytes() if spec.name != DEFAULT_REFERENCE else
-                                        Path(str(refmod._assets_dir() / refmod.REFERENCE_PNG)).read_bytes())
+    ink_png = cv2.imencode(".png", cv2.cvtColor(refmod.reference_ink(spec.name), cv2.COLOR_RGB2BGR))[1].tobytes()
+    (out / "reference-ink.png").write_bytes(ink_png)
+    ref_file = "reference-ink.png"
+    if spec.photo:
+        ref_file = f"reference{spec.photo_path().suffix.lower()}"
+        (out / ref_file).write_bytes(spec.photo_bytes())
     (out / "reference.sha256").write_text(refmod.reference_sha256(spec.name) + "\n")
     (out / "rubric.json").write_text(json.dumps(spec.rubric(), indent=2, sort_keys=True) + "\n")
     readme = [
         f"# Sacramento PaintBench submission: {args.label or log_dir.name}", "",
-        f"Benchmark `sacpaint` reference `{spec.name}` (sha256 `{refmod.reference_sha256(spec.name)}`).",
+        (
+            f"Benchmark `sacpaint` reference `{spec.name}` ({spec.kind}; sha256 `{refmod.reference_sha256(spec.name)}`, "
+            f"scoring ink sha256 `{refmod.ink_sha256(spec.name)}`)."
+        ),
         "Layout follows robocurve's published run datasets (clapboardbench): raw EvalLogs, one markdown page per run,",
         "self-contained HTML reports from `inspect-robots view`, videos from `inspect-robots video` when ffmpeg is present,",
         "and the rectified final canvas the scorers read for every trial.", "",
@@ -413,7 +434,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         "| HTML reports | `html/index.html` |",
         "| Final canvases + score breakdowns | `canvases/` |",
         "| Videos | `videos/` |",
-        "| Reference, its hash, the rubric | `reference.png`, `reference.sha256`, `rubric.json` |", "",
+        f"| Reference (what the model saw), its hash, the scoring ink, the rubric | `{ref_file}`, `reference.sha256`, `reference-ink.png`, `rubric.json` |", "",
         "Scores are recomputable offline from `canvases/*.png` with `sacpaint score --canonical`.", "",
     ]
     (out / "README.md").write_text("\n".join(readme))
@@ -423,13 +444,15 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_worldevals_entry(args: argparse.Namespace) -> int:
-    names = ", ".join(f'"sacpaint/{n}"' if n != DEFAULT_REFERENCE else '"sacpaint/line-v0"' for n in refmod.available())
+    from sacpaint.tasks import task_name_for
+
+    names = ", ".join(f'"{task_name_for(n)}"' for n in refmod.available())
     print(f'''Benchmark(
     name="sacpaint",
     title="Sacramento PaintBench",
     description=(
-        "Draw a fixed Sacramento skyline reference (Tower Bridge over the Capitol dome) with a pen "
-        "from camera feedback; scored offline by landmark geometry, structure, and discipline."
+        "Draw a fixed photograph of Sacramento (Tower Bridge over the Capitol dome) with a pen "
+        "from camera feedback; scored offline against its traced landmarks: geometry, structure, discipline."
     ),
     repo="https://github.com/craigm26/sacpaint",
     install="pip install sacpaint",
@@ -464,6 +487,8 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--from-reference", default=DEFAULT_REFERENCE, help="spec to copy as a starting point")
     n.add_argument("--canvas", help="WxH in mm, e.g. 210x297")
     n.add_argument("--description", default="")
+    n.add_argument("--photo", help="a photograph the model will see instead of the strokes (copied next to the spec)")
+    n.add_argument("--photo-credit", default="", help="attribution recorded in the spec and every EvalLog")
     n.add_argument("--force", action="store_true")
     n.set_defaults(fn=cmd_new)
 
@@ -476,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     ls.set_defaults(fn=cmd_list)
 
     r = sub.add_parser("run", help="inspect-robots run with the benchmark's defaults (artifacts + frames on)")
-    r.add_argument("--task", default="sacpaint/line-v0")
+    r.add_argument("--task", default="sacpaint/photo-v1")
     r.add_argument("--policy", default="agent")
     r.add_argument("--embodiment", default="sacpaint_plotter")
     r.add_argument("--model", help="passed as -P model=... (with --subscription: a claude CLI alias such as haiku, sonnet, opus)")

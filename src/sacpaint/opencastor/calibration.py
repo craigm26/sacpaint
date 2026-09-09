@@ -277,6 +277,50 @@ def fit(
     )
 
 
+#: Where the virtual easel stands by default, measured on Bob 2026-09-09. With his calibrated
+#: joint limits the tip reaches a thin shell roughly 300-370 mm from the base, so no flat sheet
+#: lies in a horizontal plane; an upright one 325 mm straight ahead, centred at base height,
+#: does (every point of it within 0.5 mm of a reachable pose; 8 of 9 probe points reached
+#: within 5 mm, the ninth at 5.9). ``distance`` is the distance from the base to the sheet's
+#: centre, ``elevation`` the centre's angle above the base plane (the sheet leans back with
+#: it, like a painter's easel), ``azimuth`` its bearing left of straight ahead.
+EASEL_DISTANCE_MM = 325.0
+EASEL_ELEVATION_DEG = 0.0
+EASEL_AZIMUTH_DEG = 0.0
+EASEL_NOTE = "virtual easel: a sheet tangent to the arm's reach sphere; no paper, no pen, the ink is telemetry"
+
+
+def easel(
+    reference: str | None = None,
+    *,
+    distance_mm: float = EASEL_DISTANCE_MM,
+    elevation_deg: float = EASEL_ELEVATION_DEG,
+    azimuth_deg: float = EASEL_AZIMUTH_DEG,
+) -> CanvasCalibration:
+    """A calibration for a sheet that is not there: tangent to the reach sphere, facing the arm.
+
+    The sheet's centre sits ``distance_mm`` from the base at ``elevation_deg``
+    above the base plane and ``azimuth_deg`` left of the base +x axis. Canvas +x
+    (right, as the arm sees it) runs to base -y, canvas +y runs up the leaning
+    sheet, and canvas +z comes off the paper towards the base. Only the
+    ``virtual`` medium may use it: a real pen driven at an easel that is not
+    there is a real arm driven into whatever is.
+    """
+    width, height = corner_canvas_mm(reference)["tr"][:2]
+    el, az = math.radians(elevation_deg), math.radians(azimuth_deg)
+    normal = np.array([math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)])  # base -> centre
+    up = np.array([-math.sin(el) * math.cos(az), -math.sin(el) * math.sin(az), math.cos(el)])  # up the sheet
+    right = np.cross(up, -normal)  # canvas +x; right-handed with up and the off-paper axis
+    rotation = np.column_stack([right, up, -normal])
+    centre = float(distance_mm) * normal
+    translation = centre - right * (width / 2.0) - up * (height / 2.0)
+    points = []
+    for name, canvas in corner_canvas_mm(reference).items():
+        base = rotation @ np.asarray(canvas) + translation
+        points.append({"corner": name, "canvas_mm": list(canvas), "base_mm": [float(v) for v in base], "residual_mm": 0.0})
+    return CanvasCalibration(rotation, translation, points=points, note=EASEL_NOTE)
+
+
 def save(calibration: CanvasCalibration, path: str | Path) -> Path:
     """Write the calibration as JSON, creating the parent directory."""
     out = Path(path)

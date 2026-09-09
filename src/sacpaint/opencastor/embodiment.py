@@ -24,6 +24,14 @@ that makes the score mean anything.
 The overhead frame carries ``extra["canvas_corners"]`` whenever the corners are
 known — four normalised ``(x, y)`` pairs in TL TR BR BL order, as tapped in the
 phone app — which is the scorer's first and best rectification route.
+
+**Media.** ``-E medium=pen`` (default) is the benchmark proper: a pen, a sheet,
+a camera. ``-E medium=virtual`` is for a rig with no paper and no pen: the arm
+makes every motion for real through the gateway, and the "ink" is drawn from
+where the arm *measured* its tip after each pen-down move. That frame is a
+canonical canvas (nothing to rectify), and every score it produces is labelled
+``medium=virtual`` so it is never mistaken for a mark on paper. Pair it with
+``-E calibration=easel``, an upright sheet the arm can reach.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from inspect_robots.embodiment import SELF_PACED, EmbodimentInfo
 from inspect_robots.errors import ConfigError, EmbodimentFault
@@ -64,6 +73,7 @@ from sacpaint.opencastor.client import (
     MOTION_SCOPE,
     OBSERVE_SCOPE,
     GatewayClient,
+    GatewayMiss,
     load_pair_payload,
     read_eef_mm,
     read_reached,
@@ -75,8 +85,15 @@ OVERHEAD = "overhead"
 REFERENCE_CAM = "reference"
 #: The scorer's preferred rectification input: four normalised TL TR BR BL corners.
 CORNERS_KEY = "canvas_corners"
-#: Never set by this embodiment. A photograph is not a canonical canvas.
+#: Set only by the virtual medium. A photograph is not a canonical canvas; telemetry ink is.
 CANONICAL_FLAG = "canonical_canvas"
+#: ``observation.extra["medium"]``: ``pen`` (paper, the real thing) or ``virtual`` (telemetry ink).
+MEDIUM_KEY = "medium"
+MEDIUM_PEN = "pen"
+MEDIUM_VIRTUAL = "virtual"
+MEDIA = (MEDIUM_PEN, MEDIUM_VIRTUAL)
+#: ``-E calibration=easel``: the virtual upright sheet from :func:`calibration.easel`.
+EASEL = "easel"
 
 #: Canvas-frame heights, metres. Identical to the mock's, because the contract is.
 PEN_DOWN_Z = 0.002
@@ -134,6 +151,18 @@ def _canvas_mm(name: str) -> tuple[float, float]:
     return tuple(float(v) for v in getattr(ref, "CANVAS_MM", _FALLBACK_CANVAS_MM))  # type: ignore[return-value]
 
 
+def _reference_size(name: str) -> tuple[int, int]:
+    """Size (width, height) of the image served on the ``reference`` camera (a photo's native size)."""
+    from sacpaint import reference as ref
+
+    get_spec = getattr(ref, "get_spec", None)
+    if callable(get_spec):
+        spec = get_spec(name)
+        size = getattr(spec, "reference_size", None)
+        return tuple(int(v) for v in (size() if callable(size) else spec.canonical_size()))  # type: ignore[return-value]
+    return _canonical_size(name)
+
+
 def _canonical_size(name: str) -> tuple[int, int]:
     """The canonical canvas image size (width, height) in pixels."""
     from sacpaint import reference as ref
@@ -185,6 +214,52 @@ def _docs(canvas_mm: tuple[float, float]) -> str:
     )
 
 
+def _virtual_docs(canvas_mm: tuple[float, float]) -> str:
+    width, height = canvas_mm
+    return (
+        f"You move a robot arm's tip over an imaginary upright {width:.0f} x {height:.0f} mm sheet: "
+        "there is no paper and no pen, and the 'overhead' image is drawn from where the arm "
+        "measured its tip after each move, so it is exact and never obstructed. Targets are metres "
+        f"in the canvas frame: x runs right across the sheet (0 to {width / 1000:.2f}), y runs up "
+        f"the sheet (0 to {height / 1000:.2f}, so y=0 is the bottom edge), z is height off the "
+        f"sheet (0 to {Z_MAX:.2f}). A segment is inked when both its ends were commanded at "
+        f"z <= {PEN_DOWN_Z}; move with z at {PEN_UP_Z} or higher to travel without marking. Each "
+        "target is a real arm motion that takes time, so prefer long strokes to many tiny ones. "
+        "The 'reference' camera shows the picture you must reproduce."
+    )
+
+
+class VirtualInk:
+    """A canonical canvas inked from measured tip positions: the ``virtual`` medium's sheet."""
+
+    def __init__(self, canonical_wh: tuple[int, int], canvas_mm: tuple[float, float], stroke_px: int = 3) -> None:
+        self._w, self._h = int(canonical_wh[0]), int(canonical_wh[1])
+        self._px_per_m = 1000.0 * self._w / float(canvas_mm[0])
+        self._stroke_px = int(stroke_px)
+        self._canvas = self._blank()
+        self.segments = 0
+
+    def _blank(self) -> np.ndarray:
+        return np.full((self._h, self._w, 3), 255, dtype=np.uint8)
+
+    def clear(self) -> None:
+        self._canvas = self._blank()
+        self.segments = 0
+
+    def _px(self, canvas_m: np.ndarray) -> tuple[int, int]:
+        col = round(float(canvas_m[0]) * self._px_per_m)
+        row = round(self._h - float(canvas_m[1]) * self._px_per_m)
+        return min(max(col, 0), self._w - 1), min(max(row, 0), self._h - 1)
+
+    def segment(self, a_m: np.ndarray, b_m: np.ndarray) -> None:
+        """Ink the straight segment between two measured tip positions (canvas metres)."""
+        cv2.line(self._canvas, self._px(a_m), self._px(b_m), (0, 0, 0), self._stroke_px)
+        self.segments += 1
+
+    def image(self) -> np.ndarray:
+        return self._canvas.copy()
+
+
 # -- the embodiment ----------------------------------------------------------
 
 
@@ -214,6 +289,10 @@ class OpenCastorEmbodiment:
         # geometry
         calibration: str | None = None,
         reference: str | None = None,
+        medium: str = MEDIUM_PEN,
+        easel_distance_mm: float = calib.EASEL_DISTANCE_MM,
+        easel_elevation_deg: float = calib.EASEL_ELEVATION_DEG,
+        easel_azimuth_deg: float = calib.EASEL_AZIMUTH_DEG,
         pen_down_z: float = PEN_DOWN_Z,
         travel_z: float = PEN_UP_Z,
         park_x: float = 0.0,
@@ -244,8 +323,16 @@ class OpenCastorEmbodiment:
         self.reference_name = reference or _default_reference_name()
         self.canvas_mm = _canvas_mm(self.reference_name)
         self._canonical_wh = _canonical_size(self.reference_name)
+        self._reference_wh = _reference_size(self.reference_name)
 
+        if medium not in MEDIA:
+            raise ConfigError(f"-E medium must be one of {MEDIA}, got {medium!r}")
+        self.medium = medium
+        self._easel = (float(easel_distance_mm), float(easel_elevation_deg), float(easel_azimuth_deg))
         self._calibration = self._resolve_calibration(calibration)
+        self._ink: VirtualInk | None = (
+            VirtualInk(self._canonical_wh, self.canvas_mm) if medium == MEDIUM_VIRTUAL else None
+        )
 
         self.pen_down_z = float(pen_down_z)
         self.travel_z = float(travel_z)
@@ -281,13 +368,17 @@ class OpenCastorEmbodiment:
 
         cam_token = camera_token or os.environ.get(camera_token_env) or payload.get("console_token")
         console_url = str(payload.get("console_url") or DEFAULT_CONSOLE_URL).rstrip("/")
-        self.overhead = overhead_source or HttpFrameSource(
-            overhead_url or f"{console_url}/camera/{OVERHEAD}/snapshot",
-            name=OVERHEAD,
-            token=cam_token,
-            timeout_s=camera_timeout_s,
-            prime_url=overhead_prime_url,
-        )
+        self.overhead: FrameSource | None
+        if self._ink is not None and overhead_source is None and not overhead_url:
+            self.overhead = None  # the virtual medium has no sheet to photograph
+        else:
+            self.overhead = overhead_source or HttpFrameSource(
+                overhead_url or f"{console_url}/camera/{OVERHEAD}/snapshot",
+                name=OVERHEAD,
+                token=cam_token,
+                timeout_s=camera_timeout_s,
+                prime_url=overhead_prime_url,
+            )
         self.reference_camera = reference_source or StaticFrameSource(
             _reference_image(self.reference_name), name=REFERENCE_CAM
         )
@@ -308,18 +399,20 @@ class OpenCastorEmbodiment:
         self._trial: tuple[str, int] | None = None
 
         self.num_steps = 0
+        self.misses = 0
         self._instruction: str | None = None
         self._eef = np.array([0.0, 0.0, self.travel_z])
+        self._commanded = np.array([0.0, 0.0, self.travel_z])
 
         self.info = EmbodimentInfo(
-            name="opencastor",
+            name="opencastor" if self.medium == MEDIUM_PEN else f"opencastor-{self.medium}",
             action_space=action_space(self.canvas_mm),
-            observation_space=observation_space(self._canonical_wh, self._overhead_wh()),
+            observation_space=observation_space(self._reference_wh, self._overhead_wh()),
             control_hz=None,
             is_simulated=False,
             capabilities=frozenset({SELF_PACED}),
             supported_target_kinds=frozenset({"reference_drawing"}),
-            docs=_docs(self.canvas_mm),
+            docs=_docs(self.canvas_mm) if self._ink is None else _virtual_docs(self.canvas_mm),
         )
 
     # -- construction helpers ---------------------------------------------
@@ -338,6 +431,17 @@ class OpenCastorEmbodiment:
         """Load the taught transform, refusing to move without one."""
         if isinstance(path, calib.CanvasCalibration):  # injected in tests
             return path
+        if path == EASEL:
+            if self.medium != MEDIUM_VIRTUAL:
+                raise ConfigError(
+                    "-E calibration=easel describes a sheet that is not there, so it is only allowed "
+                    "with -E medium=virtual. With a real pen, teach the real sheet: "
+                    "`python -m sacpaint.opencastor.calibrate --out canvas.json`."
+                )
+            distance_mm, elevation_deg, azimuth_deg = self._easel
+            return calib.easel(
+                self.reference_name, distance_mm=distance_mm, elevation_deg=elevation_deg, azimuth_deg=azimuth_deg
+            )
         if not path:
             raise calib.CalibrationError(
                 "no canvas calibration: this arm cannot know where the sheet is. Teach one "
@@ -405,9 +509,12 @@ class OpenCastorEmbodiment:
         self._wait_ready()
         self.client.invoke(self.home_tool, {}, scope=MOTION_SCOPE)
         self._eef = self._read_eef(default=np.array([0.0, 0.0, self.travel_z]))
+        self._commanded = np.array([0.0, 0.0, self.travel_z])
         self._instruction = scene.instruction
         self.num_steps = 0
         self._corners = None
+        if self._ink is not None:
+            self._ink.clear()
         return self._observe()
 
     def step(self, action: Action) -> StepResult:
@@ -460,7 +567,22 @@ class OpenCastorEmbodiment:
     def _move_to(self, canvas_target_m: np.ndarray) -> None:
         """One gateway motion: canvas metres in, arm-base millimetres on the wire."""
         base_mm = self._calibration.canvas_to_base(canvas_target_m)
-        result = self.client.invoke(self.move_tool, self._move_payload(base_mm), scope=MOTION_SCOPE)
+        try:
+            result = self.client.invoke(self.move_tool, self._move_payload(base_mm), scope=MOTION_SCOPE)
+        except GatewayMiss as miss:
+            if self.strict_reach:
+                raise EmbodimentFault(
+                    f"{miss} The pen is not where the policy thinks, so every later stroke would "
+                    "start from the wrong place. Pass -E strict_reach=false to carry on from the "
+                    "measured position instead (the virtual medium inks what was measured)."
+                ) from miss
+            self._say(f"missed {tuple(round(float(v), 1) for v in base_mm)} mm by {miss.error_mm} mm; carrying on from the measured pose")
+            self.misses += 1
+            previous = self._eef
+            self._eef = self._read_eef(default=canvas_target_m.copy())
+            self._ink_segment(previous, canvas_target_m)
+            self._commanded = canvas_target_m.copy()
+            return
 
         reached = read_reached(result.telemetry)
         if reached is False and self.strict_reach:
@@ -474,9 +596,27 @@ class OpenCastorEmbodiment:
         eef_mm = read_eef_mm(result.telemetry)
         # A tool that does not report the tip (today's status.report does not) leaves the
         # commanded target as the honest best estimate, which is what the arm was asked for.
-        self._eef = (
-            self._calibration.base_to_canvas(eef_mm) if eef_mm is not None else canvas_target_m.copy()
-        )
+        previous = self._eef
+        if eef_mm is not None:
+            self._eef = self._calibration.base_to_canvas(eef_mm)
+        elif self._ink is not None and self.state_tool:
+            # Virtual ink is drawn from measurement wherever measurement exists: ask the arm.
+            self._eef = self._read_eef(default=canvas_target_m.copy())
+        else:
+            self._eef = canvas_target_m.copy()
+        self._ink_segment(previous, canvas_target_m)
+        self._commanded = canvas_target_m.copy()
+
+    def _ink_segment(self, previous: np.ndarray, canvas_target_m: np.ndarray) -> None:
+        """Virtual medium: ink from the last measured pose to the new one if the pen was down for both."""
+        if self._ink is None:
+            return
+        # Pen state is what was *commanded* (a servo's few millimetres of z error must not
+        # lift or drop the pen); the geometry is what was *measured*.
+        down_before = float(self._commanded[2]) <= self.pen_down_z
+        down_now = float(canvas_target_m[2]) <= self.pen_down_z
+        if down_before and down_now:
+            self._ink.segment(previous, self._eef)
 
     def _move_payload(self, base_mm: np.ndarray) -> dict[str, Any]:
         """Build the cartesian tool's arguments in whichever spelling the gateway speaks."""
@@ -505,9 +645,16 @@ class OpenCastorEmbodiment:
     # -- observation -------------------------------------------------------
 
     def _observe(self) -> Observation:
-        """One fresh overhead photograph, the reference, the pen position, and the corners."""
+        """One fresh overhead photograph (or the virtual ink), the reference, the pen position, the corners."""
+        extra: dict[str, Any] = {MEDIUM_KEY: self.medium, "misses": self.misses}
+        if self._ink is not None:
+            images = {OVERHEAD: self._ink.image(), REFERENCE_CAM: self.reference_camera.fetch()}
+            extra[CANONICAL_FLAG] = True  # telemetry ink is already the canonical canvas
+            if self.overhead is not None:
+                images["scene"] = self.overhead.fetch()  # a real camera, if one is watching, for the record
+            return Observation(images=images, state={"eef_pos": self._eef.copy()}, instruction=self._instruction, extra=extra)
+        assert self.overhead is not None
         images = {OVERHEAD: self.overhead.fetch(), REFERENCE_CAM: self.reference_camera.fetch()}
-        extra: dict[str, Any] = {}
         corners = self._canvas_corners()
         if corners is not None:
             extra[CORNERS_KEY] = [[float(x), float(y)] for x, y in corners]
@@ -538,6 +685,9 @@ class OpenCastorEmbodiment:
         """
         prompt = (
             "Fresh sheet taped down, pen capped off, hands clear of the arm — press Enter to start: "
+            if self._ink is None
+            else "Virtual easel: no paper, no pen; the arm will sweep the space in front of it. "
+            "Hands and objects clear of the arm — press Enter to start: "
         )
         if self._session is not None:
             self._session.gate(
@@ -584,7 +734,10 @@ def opencastor_embodiment(**kwargs: Any) -> OpenCastorEmbodiment:
 
 
 _BOOL_FLAGS = ("no_prompt", "strict_reach")
-_FLOAT_FLAGS = ("timeout_s", "speed", "tolerance_mm", "pen_down_z", "travel_z", "park_x", "park_y", "park_z", "camera_timeout_s")
+_FLOAT_FLAGS = (
+    "timeout_s", "speed", "tolerance_mm", "pen_down_z", "travel_z", "park_x", "park_y", "park_z", "camera_timeout_s",
+    "easel_distance_mm", "easel_elevation_deg", "easel_azimuth_deg",
+)
 
 
 def _coerce(kwargs: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,15 +1,22 @@
-"""References: a spec of strokes grouped by landmark, rendered to a PNG and a rubric.
+"""References: what the model sees, and the stroke rubric the scorers read.
 
 A reference is a ``ReferenceSpec``: the canvas size, polylines grouped by
 landmark name (canvas millimetres, origin bottom-left, x right, y up), the
-landmark weights and boxes, the relations between landmarks, and the scorer
-tolerances. Everything else (the PNG the model sees, the rubric the scorers
-read, the oracle policy's stroke list) derives from it, so nothing can drift.
+landmark weights and boxes, the relations between landmarks, the scorer
+tolerances, and optionally a **photograph**. Two images come out of it:
 
-The built-in reference is ``sacramento-line-v0``. Any ``<name>.spec.json`` in
-the package assets or in ``$SACPAINT_REFERENCES`` (default
-``~/.sacpaint/references``) becomes a task named ``sacpaint/<name>`` as soon as
-the package is imported; ``sacpaint new`` writes one for you.
+* ``reference_image(name)`` is what the model sees on the ``reference`` camera:
+  the photograph when the spec has one, otherwise the rendered strokes;
+* ``reference_ink(name)`` is what every scorer reads: the strokes rendered on
+  the canonical canvas. Scoring is geometric, so the rubric is always ink.
+
+The built-in reference is ``sacramento-photo-v1``: the original photograph of
+Sacramento (Tower Bridge above the Capitol dome, the Mall between them) and a
+stroke rubric traced over its landmarks. ``sacramento-line-v0``, the earlier
+line-drawing reference, stays available as ``sacpaint/line-v0``. Any
+``<name>.spec.json`` in the package assets or in ``$SACPAINT_REFERENCES``
+(default ``~/.sacpaint/references``) becomes a task named ``sacpaint/<name>`` as
+soon as the package is imported; ``sacpaint new`` writes one for you.
 """
 
 from __future__ import annotations
@@ -27,7 +34,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-DEFAULT_REFERENCE = "sacramento-line-v0"
+DEFAULT_REFERENCE = "sacramento-photo-v1"
+LINE_REFERENCE = "sacramento-line-v0"
+#: References defined in code. Their spec files on disk are copies for humans.
+BUILTIN_REFERENCES: tuple[str, ...] = (DEFAULT_REFERENCE, LINE_REFERENCE)
+#: The original photograph, byte-for-byte as supplied; its SHA-256 is the benchmark's identity.
+PHOTO_FILE = f"{DEFAULT_REFERENCE}.webp"
 # The physical sheet is 150 x 200 mm (fits A5 or half-letter with margins) so a
 # desk arm like the SO-ARM101 (reach ~370 mm) can cover all of it. The design
 # geometry below is written in a 300 x 400 unit frame and scaled; at 4 px/mm the
@@ -38,7 +50,8 @@ DESIGN_MM: tuple[float, float] = (300.0, 400.0)  # frame the constants below are
 _S = CANVAS_MM[0] / DESIGN_MM[0]
 STROKE_PX = 3  # rendered line width in the reference
 INK_THRESHOLD = 128  # gray below this counts as ink
-REFERENCE_PNG = f"{DEFAULT_REFERENCE}.png"
+INK_SUFFIX = ".ink.png"
+REFERENCE_PNG = f"{LINE_REFERENCE}.png"  # the line reference's pinned render (also its identity)
 RUBRIC_JSON = f"{DEFAULT_REFERENCE}.json"
 SPEC_SUFFIX = ".spec.json"
 
@@ -82,6 +95,48 @@ class ReferenceSpec:
     stroke_px: int = STROKE_PX
     description: str = ""
     instruction: str | None = None
+    #: File name of the photograph the model sees, relative to ``base_dir``; None = the strokes.
+    photo: str | None = None
+    photo_credit: str = ""
+    #: Where ``photo`` resolves from (the spec file's directory). Not serialised.
+    base_dir: str | None = field(default=None, repr=False, compare=False)
+
+    # -- kind -----------------------------------------------------------------
+
+    @property
+    def kind(self) -> str:
+        """``"photo"`` when the model sees a photograph, ``"line"`` when it sees the strokes."""
+        return "photo" if self.photo else "line"
+
+    def photo_path(self) -> Path | None:
+        """Resolved path of the photograph, or None for a line reference."""
+        if not self.photo:
+            return None
+        path = Path(self.photo).expanduser()
+        if not path.is_absolute():
+            path = Path(self.base_dir or user_reference_dir()) / path
+        return path
+
+    def photo_bytes(self) -> bytes:
+        """The photograph's bytes, exactly as pinned."""
+        path = self.photo_path()
+        if path is None:
+            raise ValueError(f"reference {self.name!r} has no photograph")
+        return path.read_bytes()
+
+    def photo_image(self) -> np.ndarray:
+        """The photograph decoded as RGB uint8 at its native size."""
+        arr = cv2.imdecode(np.frombuffer(self.photo_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if arr is None:
+            raise ValueError(f"cannot decode photograph {self.photo_path()}")
+        return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+
+    def reference_size(self) -> tuple[int, int]:
+        """Size (width_px, height_px) of the image the model sees."""
+        if self.photo:
+            h, w = self.photo_image().shape[:2]
+            return w, h
+        return self.canonical_size()
 
     # -- geometry -----------------------------------------------------------
 
@@ -107,15 +162,21 @@ class ReferenceSpec:
         return img
 
     def png_bytes(self) -> bytes:
-        """Deterministic PNG encoding of the rendered reference."""
+        """Deterministic PNG encoding of the rendered strokes (the ink the scorers read)."""
         ok, buf = cv2.imencode(".png", cv2.cvtColor(self.render(), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, 9])
         if not ok:  # pragma: no cover - cv2 failure
             raise RuntimeError("PNG encoding failed")
         return buf.tobytes()
 
-    def sha256(self) -> str:
-        """Identity of the reference: SHA-256 of its PNG bytes."""
+    def ink_sha256(self) -> str:
+        """SHA-256 of the rendered stroke PNG: the identity of the scoring rubric's ink."""
         return hashlib.sha256(self.png_bytes()).hexdigest()
+
+    def sha256(self) -> str:
+        """Identity of the reference: SHA-256 of what the model sees (photo bytes, else the ink PNG)."""
+        if self.photo:
+            return hashlib.sha256(self.photo_bytes()).hexdigest()
+        return self.ink_sha256()
 
     # -- rubric ---------------------------------------------------------------
 
@@ -145,6 +206,7 @@ class ReferenceSpec:
             landmarks[name] = {"bbox": self._norm_bbox(self._bbox_mm(name)), "weight": lm.get("weight", 1)}
         return {
             "version": self.name,
+            "kind": self.kind,
             "canvas_mm": list(self.canvas_mm),
             "px_per_mm": self.px_per_mm,
             "ink_threshold": INK_THRESHOLD,
@@ -161,14 +223,18 @@ class ReferenceSpec:
     def to_dict(self) -> dict[str, Any]:
         """Plain JSON-able form (the ``.spec.json`` file)."""
         d = asdict(self)
+        d.pop("base_dir", None)
         d["canvas_mm"] = list(self.canvas_mm)
         d["strokes"] = {k: [[[float(x), float(y)] for x, y in s] for s in v] for k, v in self.strokes.items()}
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ReferenceSpec:
+    def from_dict(cls, d: dict[str, Any], base_dir: str | Path | None = None) -> ReferenceSpec:
         """Parse a ``.spec.json`` document, validating the parts the scorers depend on."""
         d = dict(d)
+        d.pop("base_dir", None)
+        if base_dir is not None:
+            d["base_dir"] = str(base_dir)
         strokes = {k: [[(float(x), float(y)) for x, y in s] for s in v] for k, v in d.pop("strokes").items()}
         if not strokes:
             raise ValueError("a reference needs at least one stroke group")
@@ -241,7 +307,7 @@ def sacramento_spec() -> ReferenceSpec:
         "horizon": {"weight": 1, "bbox_mm": [0.0, HORIZON_Y - pad, DESIGN_MM[0], HORIZON_Y + pad]},
     }
     return ReferenceSpec(
-        name=DEFAULT_REFERENCE,
+        name=LINE_REFERENCE,
         description="Sacramento: Tower Bridge above the Capitol dome and cupola, the Capitol Mall between them, two building masses, a horizon.",
         strokes={k: [[(x * _S, y * _S) for x, y in st] for st in v] for k, v in design_strokes.items()},
         landmarks={
@@ -252,6 +318,116 @@ def sacramento_spec() -> ReferenceSpec:
         relations=[
             {"kind": "same_x", "a": "tower_bridge", "b": "capitol_dome", "tolerance": 0.05},
             {"kind": "above", "a": "tower_bridge", "b": "capitol_dome"},
+            {"kind": "above", "a": "cupola", "b": "capitol_dome"},
+            {"kind": "above", "a": "horizon", "b": "tower_bridge"},
+        ],
+    )
+
+
+# --- the built-in photograph reference ---------------------------------------------
+# Landmarks measured on the photograph (1499 x 2000 px, the sheet's 3:4), in canvas mm:
+# x = px / 10, y = (2000 - py) / 10. The rubric is the skeleton a line drawing of this
+# photo shares with it: the bridge tower, the Capitol cupola and dome, the Mall, the
+# main building masses, the horizon. Foliage, cars, and windows are deliberately absent.
+
+P_HORIZON_Y = 151.0
+# The photograph's central axis: tower, cupola and dome all sit on it (within the 1 mm the
+# photo can be read to), so the rubric puts them exactly there and the same_x relations hold.
+P_AXIS = 76.5
+P_TOWER = {"x0": 69.0, "x1": 84.0, "y0": 97.0, "y1": 133.0, "cap_x0": 68.0, "cap_x1": 85.0, "cap_y1": 136.0, "mid": 116.0, "brace": 106.5}
+P_DECK = {"x0": 63.0, "x1": 90.0, "y": 94.0}
+P_DOME = {"cx": P_AXIS, "top": 34.0, "half_width_at_bottom": 52.0}
+P_CUPOLA = {"skirt": (58.5, 94.5, 36.0), "drum": (61.5, 37.0, 91.5, 49.0), "colonnade": (63.5, 49.0, 89.5, 64.0),
+            "columns": (68.5, 73.5, 79.5, 84.5), "gold_cx": P_AXIS, "gold_cy": 67.0, "gold_r": 8.0,
+            "neck_top": 80.0, "ball_cy": 82.5, "ball_r": 2.5}
+P_ROAD = {"left": ((57.5, 40.0), (66.5, 92.0)), "right": ((95.5, 40.0), (86.5, 92.0))}
+P_BUILDINGS = {
+    "left_tower": (0.0, 90.0, 19.0, 199.5),
+    "embassy": (24.0, 92.0, 40.0, 113.0),
+    "left_mid": (5.0, 50.0, 25.0, 83.0),
+    "left_low": (0.0, 8.0, 22.0, 47.0),
+    "round_top": (93.0, 88.0, 122.0, 117.0),
+    "visit_california": (118.0, 50.0, 150.0, 121.0),
+    "right_low": (127.0, 20.0, 150.0, 45.0),
+}
+
+
+def sacramento_photo_spec() -> ReferenceSpec:
+    """The V1 Sacramento reference: the original photograph, scored against a traced landmark skeleton."""
+    t = P_TOWER
+    portal_cx, portal_r = (t["x0"] + t["x1"]) / 2, 4.5
+    tower = [
+        _rect(t["x0"], t["y0"], t["x1"], t["y1"]),
+        _rect(t["cap_x0"], t["y1"], t["cap_x1"], t["cap_y1"]),
+        [(t["x0"], t["mid"]), (t["x1"], t["mid"])],
+        # two levels of cross bracing below the window block, as on the real tower
+        [(t["x0"], t["y0"]), (t["x1"], t["brace"])],
+        [(t["x1"], t["y0"]), (t["x0"], t["brace"])],
+        [(t["x0"], t["brace"]), (t["x1"], t["brace"])],
+        [(t["x0"], t["brace"]), (t["x1"], t["mid"])],
+        [(t["x1"], t["brace"]), (t["x0"], t["mid"])],
+        _rect(71.0, 119.0, 82.0, 130.0),  # the tall window block
+        [(P_DECK["x0"], P_DECK["y"]), (P_DECK["x1"], P_DECK["y"])],
+        _arc(portal_cx, 92.0, portal_r, 0.0, 180.0) + [(portal_cx - portal_r, 90.0)],
+        [(portal_cx + portal_r, 92.0), (portal_cx + portal_r, 90.0)],
+    ]
+    d = P_DOME
+    hw, top = d["half_width_at_bottom"], d["top"]
+    r = (hw * hw + top * top) / (2 * top)
+    cy = top - r
+    a0 = math.degrees(math.asin(-cy / r))
+    dome = [_arc(d["cx"], cy, r, a0, 180.0 - a0, n=40)]
+    for x_bottom in (P_AXIS - 32.0, P_AXIS - 16.0, P_AXIS + 16.0, P_AXIS + 32.0):  # four roof ribs, apex to frame edge
+        dome.append([(d["cx"] + 0.25 * (x_bottom - d["cx"]), top - 1.0), (x_bottom, 0.0)])
+    c = P_CUPOLA
+    sx0, sx1, sy = c["skirt"]
+    cupola = [
+        [(sx0, sy), (sx1, sy)],
+        _rect(*c["drum"]),
+        _rect(*c["colonnade"]),
+        *[[(x, c["colonnade"][1] + 1.0), (x, c["colonnade"][3] - 1.0)] for x in c["columns"]],
+        _arc(c["gold_cx"], c["gold_cy"], c["gold_r"], 0.0, 180.0),
+        [(c["gold_cx"], c["gold_cy"] + c["gold_r"]), (c["gold_cx"], c["neck_top"])],
+        _arc(c["gold_cx"], c["ball_cy"], c["ball_r"], 0.0, 360.0, n=20),
+    ]
+    strokes = {
+        "ridge": [[(19.0, 160.0), (40.0, 162.0), (80.0, 161.0), (120.0, 163.0), (150.0, 161.0)]],
+        "horizon": [[(19.0, P_HORIZON_Y), (150.0, P_HORIZON_Y)]],
+        "tower_bridge": tower,
+        "road": [list(P_ROAD["left"]), list(P_ROAD["right"])],
+        "cupola": cupola,
+        "capitol_dome": dome,
+        "buildings": [_rect(*box) for box in P_BUILDINGS.values()],
+    }
+    pad = 3.0
+    return ReferenceSpec(
+        name=DEFAULT_REFERENCE,
+        description=(
+            "Sacramento, photographed from above the Capitol: the Tower Bridge at the end of the "
+            "Capitol Mall, the Capitol cupola and dome in the foreground, office towers either side, "
+            "the valley and mountains on the horizon."
+        ),
+        photo=PHOTO_FILE,
+        photo_credit="",
+        base_dir=str(_assets_dir()),
+        strokes=strokes,
+        landmarks={
+            # Boxes stop short of neighbouring strokes (the round-top building's edges at x=93, y=88), so
+            # a landmark's ink centroid is its own and the same_x relations hold exactly on the reference.
+            "tower_bridge": {"weight": 3, "bbox_mm": [P_DECK["x0"] - pad, 90.0 - pad, 92.0, t["cap_y1"] + pad]},
+            # the dome's box stops 2 mm short of the corner buildings so their edges cannot pull its centroid
+            "capitol_dome": {"weight": 3, "bbox_mm": [d["cx"] - hw + 2.0, 0.0, d["cx"] + hw - 2.0, top + pad]},
+            "cupola": {"weight": 2, "bbox_mm": [sx0 - pad, sy - pad, sx1 + pad, 87.0]},
+            "road": {"weight": 2, "bbox_mm": [55.0, 37.0, 98.0, 95.0]},
+            "buildings": {"weight": 1},
+            "horizon": {"weight": 1, "bbox_mm": [19.0, P_HORIZON_Y - pad, 150.0, P_HORIZON_Y + pad]},
+            "ridge": {"score": False},
+        },
+        bbox_pad_mm=pad,
+        relations=[
+            {"kind": "same_x", "a": "tower_bridge", "b": "capitol_dome", "tolerance": 0.05},
+            {"kind": "same_x", "a": "cupola", "b": "capitol_dome", "tolerance": 0.05},
+            {"kind": "above", "a": "tower_bridge", "b": "cupola"},
             {"kind": "above", "a": "cupola", "b": "capitol_dome"},
             {"kind": "above", "a": "horizon", "b": "tower_bridge"},
         ],
@@ -272,16 +448,16 @@ def spec_search_dirs() -> list[Path]:
 
 @lru_cache(maxsize=1)
 def _discover() -> dict[str, ReferenceSpec]:
-    specs: dict[str, ReferenceSpec] = {DEFAULT_REFERENCE: sacramento_spec()}
+    specs: dict[str, ReferenceSpec] = {DEFAULT_REFERENCE: sacramento_photo_spec(), LINE_REFERENCE: sacramento_spec()}
     for d in spec_search_dirs():
         if not d.is_dir():
             continue
         for path in sorted(d.glob(f"*{SPEC_SUFFIX}")):
             name = path.name[: -len(SPEC_SUFFIX)]
-            if name == DEFAULT_REFERENCE:
-                continue  # the built-in is defined in code; the file is a copy for humans
+            if name in BUILTIN_REFERENCES:
+                continue  # the built-ins are defined in code; the files are copies for humans
             try:
-                spec = ReferenceSpec.from_dict(json.loads(path.read_text()))
+                spec = ReferenceSpec.from_dict(json.loads(path.read_text()), base_dir=path.parent)
             except Exception as exc:  # noqa: BLE001 - a broken user spec must not hide the others
                 import warnings
 
@@ -316,25 +492,67 @@ def get_spec(name: str = DEFAULT_REFERENCE) -> ReferenceSpec:
 _image_cache: dict[str, np.ndarray] = {}
 
 
-def reference_image(name: str = DEFAULT_REFERENCE) -> np.ndarray:
-    """The reference PNG as RGB uint8. The built-in reads its checked-in file; others render."""
+def _pinned_ink_file(name: str) -> str | None:
+    """The checked-in ink PNG for a built-in, so the scorers read the pinned bytes, not a re-render."""
+    if name == LINE_REFERENCE:
+        return REFERENCE_PNG
+    if name == DEFAULT_REFERENCE:
+        return f"{DEFAULT_REFERENCE}{INK_SUFFIX}"
+    return None
+
+
+def _decode_rgb(data: bytes) -> np.ndarray:
+    arr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+
+
+def reference_ink(name: str = DEFAULT_REFERENCE) -> np.ndarray:
+    """The stroke rubric rendered on the canonical canvas, RGB uint8: what every scorer reads."""
     spec = get_spec(name)
-    if spec.name not in _image_cache:
-        if spec.name == DEFAULT_REFERENCE:
-            data = resources.files("sacpaint").joinpath("assets", REFERENCE_PNG).read_bytes()
-            arr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            _image_cache[spec.name] = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+    key = f"ink:{spec.name}"
+    if key not in _image_cache:
+        pinned = _pinned_ink_file(spec.name)
+        if pinned:
+            _image_cache[key] = _decode_rgb(resources.files("sacpaint").joinpath("assets", pinned).read_bytes())
         else:
-            _image_cache[spec.name] = spec.render()
-    return _image_cache[spec.name].copy()
+            _image_cache[key] = spec.render()
+    return _image_cache[key].copy()
+
+
+def reference_image(name: str = DEFAULT_REFERENCE) -> np.ndarray:
+    """What the model sees on the ``reference`` camera: the photograph if the spec has one, else the ink."""
+    spec = get_spec(name)
+    if not spec.photo:
+        return reference_ink(spec.name)
+    key = f"photo:{spec.name}"
+    if key not in _image_cache:
+        _image_cache[key] = spec.photo_image()
+    return _image_cache[key].copy()
+
+
+def reference_kind(name: str = DEFAULT_REFERENCE) -> str:
+    """``"photo"`` or ``"line"``: what kind of image the model is shown."""
+    return get_spec(name).kind
 
 
 def reference_sha256(name: str = DEFAULT_REFERENCE) -> str:
-    """SHA-256 of the reference PNG bytes: the benchmark's identity."""
+    """SHA-256 of what the model sees (photo bytes, else the pinned ink PNG): the benchmark's identity."""
     spec = get_spec(name)
-    if spec.name == DEFAULT_REFERENCE:
-        return hashlib.sha256(resources.files("sacpaint").joinpath("assets", REFERENCE_PNG).read_bytes()).hexdigest()
+    if spec.photo:
+        return spec.sha256()
+    pinned = _pinned_ink_file(spec.name)
+    if pinned:
+        return hashlib.sha256(resources.files("sacpaint").joinpath("assets", pinned).read_bytes()).hexdigest()
     return spec.sha256()
+
+
+def ink_sha256(name: str = DEFAULT_REFERENCE) -> str:
+    """SHA-256 of the stroke rubric's rendered PNG (pinned bytes for the built-ins)."""
+    spec = get_spec(name)
+    pinned = _pinned_ink_file(spec.name)
+    if pinned:
+        return hashlib.sha256(resources.files("sacpaint").joinpath("assets", pinned).read_bytes()).hexdigest()
+    return spec.ink_sha256()
 
 
 def load_rubric(name: str = DEFAULT_REFERENCE) -> dict[str, Any]:
@@ -363,13 +581,20 @@ def render(strokes_by_name: dict[str, list[Stroke]] | None = None, name: str = D
 
 
 def write_assets(out_dir: str) -> None:
-    """Regenerate the built-in PNG, rubric, and spec copy. Maintainers only; a change re-versions the task."""
+    """Regenerate the built-in renders, rubrics, and spec copies. Maintainers only; a change re-versions a task.
+
+    The photograph itself is never written here: it is the original file, pinned by hash.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    spec = sacramento_spec()
-    (out / REFERENCE_PNG).write_bytes(spec.png_bytes())
-    (out / RUBRIC_JSON).write_text(json.dumps(spec.rubric(), indent=2, sort_keys=True) + "\n")
-    spec.save(out / f"{DEFAULT_REFERENCE}{SPEC_SUFFIX}")
+    line = sacramento_spec()
+    (out / REFERENCE_PNG).write_bytes(line.png_bytes())
+    (out / f"{LINE_REFERENCE}.json").write_text(json.dumps(line.rubric(), indent=2, sort_keys=True) + "\n")
+    line.save(out / f"{LINE_REFERENCE}{SPEC_SUFFIX}")
+    photo = sacramento_photo_spec()
+    (out / f"{DEFAULT_REFERENCE}{INK_SUFFIX}").write_bytes(photo.png_bytes())
+    (out / RUBRIC_JSON).write_text(json.dumps(photo.rubric(), indent=2, sort_keys=True) + "\n")
+    photo.save(out / f"{DEFAULT_REFERENCE}{SPEC_SUFFIX}")
 
 
 if __name__ == "__main__":  # pragma: no cover

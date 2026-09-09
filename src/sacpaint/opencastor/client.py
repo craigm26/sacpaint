@@ -31,6 +31,7 @@ success body raises instead of returning zeros.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -137,6 +138,40 @@ class GatewayDenied(SafetyAbort):
 
 class GatewayFault(EmbodimentFault):
     """The gateway or the driver failed. Motion state may be unknown; a human is needed."""
+
+
+class GatewayMiss(GatewayFault):
+    """The driver ran the motion to completion but did not get within tolerance.
+
+    Distinct from a fault on purpose: the arm is at a known, measured place
+    (the driver walks back to the closest point it reached), it just is not
+    the place that was asked for. ``error_mm`` is the driver's final error when
+    it said so. The pen medium treats this as a fault under ``strict_reach``;
+    the virtual medium can carry on from where the arm actually is.
+    """
+
+    def __init__(self, message: str, *, error_mm: float | None = None) -> None:
+        super().__init__(message)
+        self.error_mm = error_mm
+
+
+_MISS_MARKERS = ("stopped getting closer", "diverging", "ran out of iterations")
+_FINAL_ERROR_RE = re.compile(r"final error ([0-9.]+) mm")
+
+
+def _miss_from(body: Mapping[str, Any], *, tool: str) -> GatewayMiss | None:
+    """A ``GatewayMiss`` when the driver's error text is a reach miss, else None."""
+    text = str(_detail(body).get("actuator_error") or "")
+    if not any(marker in text for marker in _MISS_MARKERS):
+        return None
+    match = _FINAL_ERROR_RE.search(text)
+    error_mm = float(match.group(1)) if match else None
+    return GatewayMiss(
+        f"the arm did not reach the {tool!r} target"
+        + (f" (final error {error_mm} mm)" if error_mm is not None else "")
+        + f": {text}",
+        error_mm=error_mm,
+    )
 
 
 class InvokeResult:
@@ -312,6 +347,9 @@ class GatewayClient:
                 receipt=self.receipts[-1],
             )
         if status != 200:
+            miss = _miss_from(body, tool=tool)
+            if miss is not None:
+                raise miss
             raise GatewayFault(_fault_message(status, body, tool=tool, url=self.invoke_url))
         if body.get("ok") is False:
             raise GatewayFault(

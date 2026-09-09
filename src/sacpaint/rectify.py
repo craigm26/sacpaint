@@ -144,8 +144,13 @@ def rectify(
     return cv2.warpPerspective(image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
 
 
-def compose_fixture_view(canvas: np.ndarray, marker_px: int = 80, gap_px: int = 12, margin_px: int = 24) -> np.ndarray:
-    """A canonical canvas inside a white sheet with the four markers at its corners (marker path tests)."""
+def compose_fixture_view(canvas: np.ndarray, marker_px: int = 80, gap_px: int = 0, margin_px: int = 24) -> np.ndarray:
+    """A canonical canvas inside a white sheet with the four markers at its corners (marker path tests).
+
+    The marker contract is that each marker's inner corner *touches* the canvas
+    corner, so ``gap_px`` defaults to 0: a gap here is a gap the rectification
+    cannot know about, and it shrinks the whole drawing by that much.
+    """
     h, w = canvas.shape[:2]
     pad = marker_px + gap_px + margin_px  # margin keeps markers off the image border, which the detector rejects
     sheet = np.full((h + 2 * pad, w + 2 * pad, 3), 255, dtype=np.uint8)

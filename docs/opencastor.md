@@ -132,7 +132,7 @@ Two failures the fit catches for you:
 
 ```bash
 inspect-robots run \
-    --task sacpaint/line-v0 \
+    --task sacpaint/photo-v1 \
     --policy agent \
     --embodiment opencastor \
     -P model=anthropic/claude-fable-5 \
@@ -174,6 +174,41 @@ sacpaint run --embodiment opencastor --model anthropic/claude-fable-5 \
 ```
 
 ---
+
+## No paper or pen: the virtual easel (`-E medium=virtual`)
+
+When the rig has an arm but nothing to draw with, the same body runs the whole
+benchmark loop with the sheet replaced by telemetry. The arm makes every motion
+for real through the gateway (signed receipts and all); after each pen-down
+move the adapter asks `arm.state` where the tip actually is and inks the
+segment on a canonical canvas. That canvas is the `overhead` frame (marked
+`canonical_canvas`, nothing to rectify), and every score is labelled
+`medium=virtual`, never comparable with a mark on paper.
+
+```bash
+sacpaint run --policy sacpaint_trace --embodiment opencastor --no-rerun --no-prompt \
+  -- -E pair_payload=/home/craigm26/bob/pair-payload.json \
+     -E medium=virtual -E calibration=easel \
+     -E move_tool=arm.reach_point -E move_args=reach_point \
+     -E tolerance_mm=5 -E strict_reach=false
+```
+
+`calibration=easel` is a sheet that is not there, so it is refused with a real
+pen. Where it stands was measured on Bob on 2026-09-09: with his calibrated
+joint limits the tip reaches a thin shell roughly 300–370 mm from the base,
+which no flat sheet on the desk fits inside, but an upright 150 × 200 mm sheet
+325 mm straight ahead, centred at base height, does (every point within 0.5 mm
+of a reachable pose; 8 of 9 probe points reached within 5 mm, the ninth at
+5.9 mm). Move it with `-E easel_distance_mm`, `-E easel_elevation_deg` (the
+sheet leans back with it) and `-E easel_azimuth_deg`.
+
+Two things this mode changed in the driver, both live on Bob and in
+`so-arm101-actuator` main: `arm.reach_point` now warm-starts from a table of
+the safe envelope, waits for the joints to settle before measuring, and
+compensates the servos' static error, because before that 0 of 27 reachable
+points arrived. A miss now walks the arm back to the closest point it measured
+and reports the error history; with `strict_reach=false` the adapter inks to
+that measured point and carries on (the observation's `misses` counts them).
 
 ## The iPhone as the overhead camera (OpenCastor iOS build 76, Eval mode)
 
@@ -223,8 +258,10 @@ and `-E corners_url="http://<robot>:8002/eval/corners?stream=overhead"`, with
 
 | Flag | Default | What it does |
 |---|---|---|
-| `calibration` | — | **Required.** Path to the `canvas.json` from step 3. |
-| `reference` | `sacramento-line-v0` | Which reference to serve on the `reference` camera. Match the task. |
+| `calibration` | — | **Required.** Path to the `canvas.json` from step 3, or `easel` (virtual medium only). |
+| `medium` | `pen` | `pen` (a pen on a photographed sheet) or `virtual` (no paper: the canvas is inked from the arm's measured tip; see above). |
+| `easel_distance_mm` / `easel_elevation_deg` / `easel_azimuth_deg` | `325` / `0` / `0` | Where the virtual easel stands: distance from the base to the sheet's centre, its elevation above the base plane, its bearing left of straight ahead. |
+| `reference` | `sacramento-photo-v1` | Which reference to serve on the `reference` camera. Match the task. |
 | `pen_down_z` | `0.002` | Canvas-frame height at or below which the pen marks (metres). |
 | `travel_z` | `0.005` | Height that travels without marking. Must be above `pen_down_z`. |
 | `park_x`, `park_y` | `0.0`, `0.0` | Where `observe_parked()` parks, in canvas metres. Move it if the arm blocks the camera's view of the sheet there. |

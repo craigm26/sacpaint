@@ -68,6 +68,8 @@
     }
   },
   "name": "sacramento-line-v0",
+  "photo": null,
+  "photo_credit": "",
   "px_per_mm": 4.0,
   "relations": [
     {

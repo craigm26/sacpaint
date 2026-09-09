@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sacpaint"
-version = "0.2.2"
-description = "Sacramento PaintBench: draw a fixed Sacramento skyline reference from camera feedback, scored by landmark geometry. An Inspect Robots benchmark."
+version = "0.3.0"
+description = "Sacramento PaintBench: draw a fixed photograph of Sacramento from camera feedback, scored by landmark geometry. An Inspect Robots benchmark."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -37,6 +37,7 @@ sacpaint = "sacpaint.cli:main"
 sacpaint-claude-shim = "sacpaint.claude_shim.__main__:main"
 
 [project.entry-points."inspect_robots.tasks"]
+"sacpaint/photo-v1" = "sacpaint.tasks:photo_v1"
 "sacpaint/line-v0" = "sacpaint.tasks:line_v0"
 
 [project.entry-points."inspect_robots.embodiments"]
@@ -56,7 +57,7 @@ sacpaint_discipline = "sacpaint.scorers:discipline"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sacpaint = ["assets/*.png", "assets/*.json"]
+sacpaint = ["assets/*.png", "assets/*.json", "assets/*.webp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

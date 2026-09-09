@@ -3,7 +3,7 @@
 All scorers read the same final canvas (the parked observation's ``overhead``
 frame when the embodiment offers one, else the last step's), rectify it unless
 the embodiment marked it canonical, binarize ink, and compare against the
-reference named in the scene's target (default ``sacramento-line-v0``).
+reference named in the scene's target (default ``sacramento-photo-v1``).
 Nothing here calls a model; every number is reproducible offline from the
 final frame. If ``SACPAINT_ARTIFACTS`` names a directory, the composite scorer
 also writes the rectified final canvas and the full score breakdown there, so
@@ -25,11 +25,15 @@ from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Target
 from inspect_robots.scorer import Score
 
-from sacpaint.reference import DEFAULT_REFERENCE, INK_THRESHOLD, ReferenceSpec, get_spec, reference_image
+from sacpaint.reference import DEFAULT_REFERENCE, INK_THRESHOLD, ReferenceSpec, get_spec, reference_ink
 
 OVERHEAD = "overhead"
 CANONICAL_FLAG = "canonical_canvas"
 CORNERS_KEY = "canvas_corners"
+#: ``observation.extra["medium"]``: what the marks are made of. ``pen`` is the leaderboard medium;
+#: ``virtual`` is ink synthesised from arm telemetry (no paper); ``sim`` is the mock world.
+MEDIUM_KEY = "medium"
+DEFAULT_MEDIUM = "pen"
 ARTIFACTS_ENV = "SACPAINT_ARTIFACTS"
 WIRE_LABEL_ENV = "SACPAINT_WIRE_LABEL"  # e.g. "claude-code-cli" for subscription-shim runs
 
@@ -88,10 +92,23 @@ def final_canvas(record: TrialRecord, spec: ReferenceSpec | None = None) -> np.n
     return rectify(frame, corners=obs.extra.get(CORNERS_KEY), size=(w, h))
 
 
-def ink_mask(rgb: np.ndarray, threshold: int = INK_THRESHOLD) -> np.ndarray:
-    """Boolean mask of ink pixels (dark on white)."""
+#: Pixels this close to the canvas edge are never ink. A rectified photograph of a sheet
+#: carries the sheet's own edge, its shadow, and the warp's border there; a rubric whose
+#: landmarks reach the frame (the photo's dome is cut by it) must not read those as marks.
+EDGE_MARGIN_FRAC = 0.01  # of the shorter side: 1.5 mm on the 150 x 200 mm sheet
+
+
+def ink_mask(rgb: np.ndarray, threshold: int = INK_THRESHOLD, edge_margin_frac: float = EDGE_MARGIN_FRAC) -> np.ndarray:
+    """Boolean mask of ink pixels (dark on white), blank within the edge margin."""
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    return gray < threshold
+    mask = gray < threshold
+    m = round(min(gray.shape[:2]) * edge_margin_frac)
+    if m > 0:
+        mask[:m, :] = False
+        mask[-m:, :] = False
+        mask[:, :m] = False
+        mask[:, -m:] = False
+    return mask
 
 
 def _bbox_px(bbox: list[float], size: tuple[int, int]) -> tuple[int, int, int, int]:
@@ -253,7 +270,7 @@ def discipline_details(canvas: np.ndarray, ref: np.ndarray, band_frac: float) ->
 
 def score_canvas(canvas: np.ndarray, spec: ReferenceSpec) -> dict[str, Any]:
     """Every image-only score for a canonical canvas (no trial needed). Used by ``sacpaint score``."""
-    ref = reference_image(spec.name)
+    ref = reference_ink(spec.name)
     rubric = spec.rubric()
     lm = landmark_details(canvas, rubric, ref)
     st = structure_pr(canvas, ref, rubric["structure_tolerance_frac"])
@@ -290,7 +307,7 @@ class _LandmarkGeometry:
         canvas = final_canvas(record, spec)
         if canvas is None:
             return _no_frame()
-        details = landmark_details(canvas, spec.rubric(), reference_image(spec.name))
+        details = landmark_details(canvas, spec.rubric(), reference_ink(spec.name))
         return Score(value=details["value"], explanation="landmark presence x position, plus relations", metadata=details)
 
 
@@ -308,7 +325,7 @@ class _Structure:
         canvas = final_canvas(record, spec)
         if canvas is None:
             return _no_frame()
-        r = structure_pr(canvas, reference_image(spec.name), spec.structure_tolerance_frac)
+        r = structure_pr(canvas, reference_ink(spec.name), spec.structure_tolerance_frac)
         return Score(value=r["value"], explanation="precision x recall of ink within tolerance of reference ink", metadata=r)
 
 
@@ -326,7 +343,7 @@ class _Discipline:
         canvas = final_canvas(record, spec)
         if canvas is None:
             return _no_frame()
-        d = discipline_details(canvas, reference_image(spec.name), spec.discipline_band_frac)
+        d = discipline_details(canvas, reference_ink(spec.name), spec.discipline_band_frac)
         return Score(
             value=d["value"],
             explanation="1 - stray ink fraction, scaled down when total ink exceeds 4x reference; 0 for a blank canvas",
@@ -381,6 +398,8 @@ class _Composite:
         spec = spec_for(target)
         weights = spec.weights
         canvas = final_canvas(record, spec)
+        obs = final_observation(record)
+        medium = str(((getattr(obs, "extra", None) or {}).get(MEDIUM_KEY)) or DEFAULT_MEDIUM)
         if canvas is None:
             details: dict[str, Any] = {"error": "no final canvas frame"}
             parts = {k: 0.0 for k in weights}
@@ -400,10 +419,11 @@ class _Composite:
             "parts": parts,
             "details": details,
             "reference": spec.name,
+            "medium": medium,
             "wire": os.environ.get(WIRE_LABEL_ENV, "api"),
         }
         artifact = _write_artifacts(record, canvas, payload)
-        meta: dict[str, Any] = {"parts": parts, "weights": weights, "details": details}
+        meta: dict[str, Any] = {"parts": parts, "weights": weights, "details": details, "medium": medium}
         if artifact:
             meta["artifact"] = artifact
         return Score(value=value, explanation="weighted sum per rubric (efficiency scaled by structure)", metadata=meta)

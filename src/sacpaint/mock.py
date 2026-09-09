@@ -44,7 +44,8 @@ def _docs(spec: ReferenceSpec) -> str:
         f"(0 to {Z_MAX:.2f}). The pen draws whenever z <= {PEN_DOWN_Z} for the whole segment; move "
         f"with z at {PEN_UP_Z} or higher to travel without marking. The 'overhead' camera shows "
         f"the sheet upright (image top = y {h / 1000:.2f}). The 'reference' camera shows the "
-        "drawing you must reproduce at the same scale and orientation."
+        "picture you must reproduce, framed exactly as the sheet is: its left, right, top and "
+        "bottom edges are the sheet's edges."
     )
 
 
@@ -62,10 +63,11 @@ def action_space(spec: ReferenceSpec) -> Box:
 
 
 def observation_space(spec: ReferenceSpec) -> ObservationSpace:
-    """Two cameras at the reference's canonical size plus the pen position."""
+    """The overhead at the canonical canvas size, the reference at its own size, plus the pen position."""
     w, h = spec.canonical_size()
+    rw, rh = spec.reference_size()
     return ObservationSpace(
-        cameras=(CameraSpec(OVERHEAD, h, w, 3), CameraSpec(REFERENCE_CAM, h, w, 3)),
+        cameras=(CameraSpec(OVERHEAD, h, w, 3), CameraSpec(REFERENCE_CAM, rh, rw, 3)),
         state=StateSpec((StateField("eef_pos", (3,), "m"),)),
     )
 
@@ -156,6 +158,7 @@ class PlotterEmbodiment:
         else:
             overhead = self._canvas.copy()
             extra = {CANONICAL_FLAG: True}
+        extra["medium"] = "sim"
         return Observation(
             images={OVERHEAD: overhead, REFERENCE_CAM: self._reference.copy()},
             state={"eef_pos": self._eef.copy()},

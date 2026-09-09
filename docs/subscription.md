@@ -49,7 +49,7 @@ curl -s http://127.0.0.1:8931/healthz
 ```bash
 export SACPAINT_SHIM_KEY=unused   # the shim ignores it; the flag needs a name
 
-inspect-robots run --task sacpaint/line-v0 --policy agent \
+inspect-robots run --task sacpaint/photo-v1 --policy agent \
     -P base_url=http://127.0.0.1:8931/v1 \
     -P api_key_env=SACPAINT_SHIM_KEY \
     -P model=haiku \

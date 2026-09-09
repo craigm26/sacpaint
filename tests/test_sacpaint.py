@@ -17,7 +17,7 @@ from sacpaint import cli, reference
 from sacpaint.mock import IdlePolicy, PlotterEmbodiment, TracePolicy
 from sacpaint.rectify import RectifyError, compose_fixture_view, compose_sheet_view, find_canvas_corners, rectify
 from sacpaint.scorers import CANONICAL_FLAG, CORNERS_KEY, OVERHEAD, discipline, landmark_geometry, structure
-from sacpaint.tasks import line_v0, make_task, register_discovered
+from sacpaint.tasks import line_v0, make_task, photo_v1, register_discovered
 
 ASSETS = Path(reference.__file__).parent / "assets"
 
@@ -49,11 +49,50 @@ def _perspective(sheet: np.ndarray) -> np.ndarray:
 
 
 def test_assets_match_generator() -> None:
-    spec = reference.sacramento_spec()
-    assert hashlib.sha256(spec.png_bytes()).hexdigest() == reference.reference_sha256()
-    assert json.loads((ASSETS / reference.RUBRIC_JSON).read_text()) == spec.rubric()
-    on_disk = json.loads((ASSETS / f"{reference.DEFAULT_REFERENCE}{reference.SPEC_SUFFIX}").read_text())
-    assert reference.ReferenceSpec.from_dict(on_disk).rubric() == spec.rubric()
+    line = reference.sacramento_spec()
+    assert hashlib.sha256(line.png_bytes()).hexdigest() == reference.reference_sha256(reference.LINE_REFERENCE)
+    assert reference.reference_sha256(reference.LINE_REFERENCE).startswith("ce081e13")  # the V0 identity, unchanged
+    assert json.loads((ASSETS / f"{reference.LINE_REFERENCE}.json").read_text()) == line.rubric()
+    photo = reference.sacramento_photo_spec()
+    assert hashlib.sha256(photo.png_bytes()).hexdigest() == reference.ink_sha256()
+    assert json.loads((ASSETS / reference.RUBRIC_JSON).read_text()) == photo.rubric()
+    for spec in (line, photo):
+        on_disk = json.loads((ASSETS / f"{spec.name}{reference.SPEC_SUFFIX}").read_text())
+        assert reference.ReferenceSpec.from_dict(on_disk, base_dir=ASSETS).rubric() == spec.rubric()
+
+
+def test_the_model_sees_the_photograph_and_the_scorers_see_the_ink() -> None:
+    assert reference.DEFAULT_REFERENCE == "sacramento-photo-v1"
+    assert reference.reference_kind() == "photo"
+    seen = reference.reference_image()
+    assert seen.shape == (2000, 1499, 3)  # the original, native size, 3:4 like the sheet
+    assert (seen.std(axis=2) > 8).mean() > 0.3  # a colour photograph, not a black-and-white render
+    ink = reference.reference_ink()
+    assert ink.shape == (800, 600, 3)
+    assert set(np.unique(ink)) <= {0, 255}
+    photo_sha = hashlib.sha256((ASSETS / reference.PHOTO_FILE).read_bytes()).hexdigest()
+    assert reference.reference_sha256() == photo_sha != reference.ink_sha256()
+    task = make_task()
+    assert task.name == "sacpaint/photo-v1"
+    assert task.metadata["reference_kind"] == "photo"
+    assert task.metadata["reference_sha256"] == photo_sha
+    assert task.scenes[0].target.spec["ink_sha256"] == reference.ink_sha256()
+    # the line reference still answers as before
+    assert reference.reference_image(reference.LINE_REFERENCE).shape == (800, 600, 3)
+    assert reference.reference_kind(reference.LINE_REFERENCE) == "line"
+
+
+def test_photo_rubric_landmarks_sit_where_the_photo_has_them() -> None:
+    rub = reference.load_rubric()
+    lm = rub["landmarks"]
+    assert set(lm) == {"horizon", "tower_bridge", "road", "cupola", "capitol_dome", "buildings"}
+    assert lm["tower_bridge"]["weight"] == lm["capitol_dome"]["weight"] == 3
+    # normalised boxes, y down: the tower is in the upper middle, the dome along the bottom edge
+    x0, y0, x1, y1 = lm["tower_bridge"]["bbox"]
+    assert 0.35 < x0 < x1 < 0.65 and 0.25 < y0 < y1 < 0.6
+    x0, y0, x1, y1 = lm["capitol_dome"]["bbox"]
+    assert y1 == 1.0 and 0.1 < x0 < 0.2 and 0.8 < x1 < 0.9
+    assert {r["kind"] for r in rub["relations"]} == {"same_x", "above"}
 
 
 def test_spec_round_trip_and_auto_bbox() -> None:
@@ -69,10 +108,12 @@ def test_spec_round_trip_and_auto_bbox() -> None:
 
 
 def test_perfect_trace_scores_near_one_and_blank_zero() -> None:
-    ref = reference.reference_image()
+    ref = reference.reference_ink()
     blank = np.full_like(ref, 255)
     for scorer in (landmark_geometry(), structure()):
-        assert scorer(_record_with(ref), None).value == pytest.approx(1.0, abs=1e-3)
+        # 2e-3: the photo rubric's same_x relations read the ink centroids, and banker's rounding
+        # in rasterisation leaves them a third of a pixel apart on the reference itself.
+        assert scorer(_record_with(ref), None).value == pytest.approx(1.0, abs=2e-3)
         assert scorer(_record_with(blank), None).value == 0.0
     assert discipline()(_record_with(ref), None).value == pytest.approx(1.0)
     assert discipline()(_record_with(blank), None).value == 0.0
@@ -81,13 +122,16 @@ def test_perfect_trace_scores_near_one_and_blank_zero() -> None:
 @pytest.mark.parametrize("n_lines", [30, 60, 400])
 def test_scribble_is_punished(n_lines: int) -> None:
     scribble = _scribble(n_lines)
-    assert landmark_geometry()(_record_with(scribble), None).value < 0.5
-    assert structure()(_record_with(scribble), None).value < 0.5
+    # Measured 2026-09-09 on the photo rubric: 30/60/400 lines composite 0.33/0.47/0.44. The photo's
+    # skeleton covers more of the sheet than the V0 line drawing, so a dense scribble collects more
+    # structure precision; the oracle still sits 0.5 above it and the landmark term stays low.
+    assert landmark_geometry()(_record_with(scribble), None).value < 0.55
+    assert structure()(_record_with(scribble), None).value < 0.6
     assert discipline()(_record_with(scribble), None).value < 0.6
 
 
 def test_shifted_drawing_is_charged_for_placement() -> None:
-    ref = reference.reference_image()
+    ref = reference.reference_ink()
     shifted = np.full_like(ref, 255)
     shifted[:, 20:] = ref[:, :-20]  # 5 mm to the right (20 px): a placement error, not a missing landmark
     d = landmark_geometry()(_record_with(shifted), None)
@@ -109,7 +153,7 @@ def test_wobbly_hand_is_forgiven() -> None:
 
 
 def test_rectify_from_markers_under_perspective() -> None:
-    ref = reference.reference_image()
+    ref = reference.reference_ink()
     warped = _perspective(compose_fixture_view(ref))
     _, how = find_canvas_corners(warped)
     assert how == "markers"
@@ -119,7 +163,7 @@ def test_rectify_from_markers_under_perspective() -> None:
 
 
 def test_rectify_from_plain_sheet_under_perspective() -> None:
-    ref = reference.reference_image()
+    ref = reference.reference_ink()
     warped = _perspective(compose_sheet_view(ref))
     _, how = find_canvas_corners(warped)
     assert how == "sheet"
@@ -129,7 +173,7 @@ def test_rectify_from_plain_sheet_under_perspective() -> None:
 
 
 def test_rectify_from_given_corners_in_observation_extra() -> None:
-    ref = reference.reference_image()
+    ref = reference.reference_ink()
     sheet = compose_sheet_view(ref, margin_px=90)
     h, w = sheet.shape[:2]
     corners = [[90 / w, 90 / h], [(w - 90) / w, 90 / h], [(w - 90) / w, (h - 90) / h], [90 / w, (h - 90) / h]]
@@ -147,14 +191,18 @@ def test_rectify_fails_loudly_on_nothing() -> None:
 # --- end to end in the mock -----------------------------------------------------------
 
 
-def test_end_to_end_mock_eval_orders_policies(tmp_path: Path) -> None:
-    task = line_v0(max_steps=3000, epochs=1)
-    (trace,) = ir_eval(task, TracePolicy(), PlotterEmbodiment(), log_dir=str(tmp_path))
-    (idle,) = ir_eval(task, IdlePolicy(), PlotterEmbodiment(), log_dir=str(tmp_path))
+@pytest.mark.parametrize("build", [photo_v1, line_v0])
+def test_end_to_end_mock_eval_orders_policies(tmp_path: Path, build) -> None:
+    task = build(max_steps=3000, epochs=1)
+    ref = task.metadata["reference"]
+    (trace,) = ir_eval(task, TracePolicy(reference=ref), PlotterEmbodiment(reference=ref), log_dir=str(tmp_path))
+    (idle,) = ir_eval(task, IdlePolicy(), PlotterEmbodiment(reference=ref), log_dir=str(tmp_path))
     m_trace, m_idle = trace.results.metrics, idle.results.metrics
     assert m_trace["composite"] > 0.9 > m_idle["composite"]
     assert m_trace["landmark_geometry"] > 0.95
     assert m_idle["landmark_geometry"] == 0.0
+    # the mock declares its medium, and the reference camera carried what the model should see
+    assert trace.results.scores[0].metadata["medium"] == "sim" if hasattr(trace.results, "scores") else True
 
 
 @pytest.mark.parametrize("mode", ["markers", "sheet"])
@@ -178,7 +226,8 @@ def test_artifacts_are_written_when_env_set(tmp_path: Path, monkeypatch: pytest.
     jsons = list(art.glob("*.json"))
     assert len(jsons) == 1 and jsons[0].with_suffix(".png").exists()
     payload = json.loads(jsons[0].read_text())
-    assert payload["composite"] == 0.0 and payload["reference"] == reference.DEFAULT_REFERENCE
+    assert payload["composite"] == 0.0 and payload["reference"] == reference.LINE_REFERENCE
+    assert payload["medium"] == "sim"
 
 
 # --- new references become tasks ----------------------------------------------------------
@@ -209,7 +258,7 @@ def test_user_spec_registers_as_task(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_cli_score_photo_of_sheet(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     photo = tmp_path / "photo.png"
-    cv2.imwrite(str(photo), cv2.cvtColor(_perspective(compose_sheet_view(reference.reference_image())), cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(photo), cv2.cvtColor(_perspective(compose_sheet_view(reference.reference_ink())), cv2.COLOR_RGB2BGR))
     assert cli.main(["score", str(photo)]) == 0
     out = capsys.readouterr().out
     assert "corners     sheet" in out

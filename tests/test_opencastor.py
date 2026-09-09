@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import pytest
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import EmbodimentFault, SafetyAbort
+from inspect_robots.errors import ConfigError, EmbodimentFault, SafetyAbort
 from inspect_robots.scene import Scene
 from inspect_robots.types import Action
 
@@ -985,3 +985,123 @@ def test_a_pairing_payload_supplies_the_endpoint_bearer_and_manifest(gateway, ca
     body.reset(SCENE)
     assert gateway.calls[0]["auth"] == f"Bearer {TOKEN}"
     assert gateway.calls[0]["envelope"]["manifest_path"] == MANIFEST
+
+
+# --- the virtual medium: no paper, no pen -------------------------------------------
+
+
+def test_easel_leans_a_sheet_against_the_reach_sphere():
+    e = calib.easel(distance_mm=335.0, elevation_deg=0.0, azimuth_deg=0.0)  # upright, straight ahead
+    assert np.isclose(np.linalg.det(e.rotation), 1.0)
+    # bottom-left as the arm sees it, the other corners, then a lift off the paper towards the base
+    assert e.canvas_to_base([0.0, 0.0, 0.0]) == pytest.approx([335.0, 75.0, -100.0])
+    assert e.canvas_to_base([0.15, 0.0, 0.0]) == pytest.approx([335.0, -75.0, -100.0])
+    assert e.canvas_to_base([0.0, 0.2, 0.0]) == pytest.approx([335.0, 75.0, 100.0])
+    assert e.canvas_to_base([0.075, 0.1, 0.005]) == pytest.approx([330.0, 0.0, 0.0])
+    assert e.base_to_canvas([335.0, -75.0, 100.0]) == pytest.approx([0.15, 0.2, 0.0])
+    tilted = calib.easel(distance_mm=335.0, elevation_deg=15.0)
+    centre = tilted.canvas_to_base([0.075, 0.1, 0.0])
+    assert np.linalg.norm(centre) == pytest.approx(335.0) and centre[2] == pytest.approx(335.0 * np.sin(np.radians(15)))
+    # every corner stays inside the 300-370 mm shell the arm can actually reach
+    for pt in tilted.points:
+        assert 310.0 < np.linalg.norm(pt["base_mm"]) < 360.0
+    lifted = tilted.canvas_to_base([0.075, 0.1, 0.005])
+    assert np.linalg.norm(lifted) == pytest.approx(330.0)  # +z is towards the base
+    # the default is the placement measured to fit Bob: upright, 325 mm ahead, centred at base height
+    default = calib.easel()
+    assert default.canvas_to_base([0.075, 0.1, 0.0]) == pytest.approx([325.0, 0.0, 0.0])
+    assert "virtual easel" in (tilted.note or "")
+
+
+def test_easel_refuses_a_real_pen(gateway, camera):
+    with pytest.raises(ConfigError, match="medium=virtual"):
+        _embodiment(gateway, camera, "easel")
+
+
+def test_unknown_medium_is_refused(gateway, camera, calibration):
+    with pytest.raises(ConfigError, match="medium"):
+        _embodiment(gateway, camera, calibration, medium="chalk")
+
+
+def test_virtual_medium_inks_from_telemetry_and_needs_no_camera(gateway, camera):
+    body = _embodiment(gateway, camera, "easel", medium="virtual", overhead_url=None)
+    assert body.info.name == "opencastor-virtual"
+    assert "no paper and no pen" in body.info.docs
+    obs = body.reset(SCENE)
+    assert obs.extra["medium"] == "virtual" and obs.extra["canonical_canvas"] is True
+    assert obs.images["overhead"].shape == (800, 600, 3) and obs.images["overhead"].min() == 255
+    assert "scene" not in obs.images
+    # travel to the start, drop the pen, draw one horizontal stroke, lift, travel away
+    body.step(Action(data=np.array([0.02, 0.10, 0.005])))
+    body.step(Action(data=np.array([0.02, 0.10, 0.002])))
+    after_drop = body.step(Action(data=np.array([0.12, 0.10, 0.002]))).observation
+    lifted = body.step(Action(data=np.array([0.12, 0.10, 0.005]))).observation
+    travelled = body.step(Action(data=np.array([0.02, 0.05, 0.005]))).observation
+    ink = after_drop.images["overhead"][:, :, 0] < 128
+    rows, cols = np.nonzero(ink)
+    # a 100 mm stroke at y=100 mm: row 800 - 400 = 400, columns 80..480 (4 px/mm)
+    assert rows.min() >= 397 and rows.max() <= 403
+    assert cols.min() == pytest.approx(80, abs=3) and cols.max() == pytest.approx(480, abs=3)
+    assert (lifted.images["overhead"][:, :, 0] < 128).sum() == ink.sum()
+    assert (travelled.images["overhead"][:, :, 0] < 128).sum() == ink.sum()
+    # every one of those was a real gateway motion at the easel plane
+    moves = [c for c in gateway.calls if c["tool"] == "arm.move_to"]
+    assert len(moves) == 5
+    args = moves[2]["envelope"]["tool_args"]
+    expect = calib.easel().canvas_to_base([0.12, 0.10, 0.002])
+    assert [args["x_mm"], args["y_mm"], args["z_mm"]] == pytest.approx(list(expect))
+    # a fresh trial starts on a clean sheet
+    assert body.reset(SCENE).images["overhead"].min() == 255
+
+
+def test_virtual_medium_keeps_a_real_camera_as_the_scene_when_one_is_given(gateway, camera):
+    body = _embodiment(gateway, camera, "easel", medium="virtual")
+    obs = body.reset(SCENE)
+    assert obs.images["scene"].ndim == 3 and obs.images["overhead"].min() == 255
+
+
+def _miss_body(error_mm: float) -> tuple[int, dict[str, Any]]:
+    return (500, {"detail": {"actuator_error": (
+        "stopped getting closer — the arm may be blocked, or this point may not be reachable at this "
+        f"approach angle (final error {error_mm} mm, history [12.1, 9.3, {error_mm}], warm_started=True)"),
+        "actuator_error_kind": None}})
+
+
+def test_client_tells_a_miss_from_a_fault(gateway):
+    from sacpaint.opencastor.client import GatewayMiss
+
+    gateway.script["arm.reach_point"] = _miss_body(7.4)
+    with pytest.raises(GatewayMiss) as info:
+        _client(gateway).invoke("arm.reach_point", {"target_mm": [1, 2, 3]})
+    assert info.value.error_mm == pytest.approx(7.4)
+    assert "did not reach" in str(info.value)
+    gateway.script["arm.reach_point"] = (500, {"detail": {"actuator_error": "SerialException: bus gone", "actuator_error_kind": None}})
+    with pytest.raises(GatewayFault, match="position is unknown") as info2:
+        _client(gateway).invoke("arm.reach_point", {"target_mm": [1, 2, 3]})
+    assert not isinstance(info2.value, GatewayMiss)
+
+
+def test_pen_medium_treats_a_miss_as_a_fault_under_strict_reach(gateway, camera, calibration):
+    body = _embodiment(gateway, camera, calibration)
+    body.reset(SCENE)
+    gateway.script["arm.move_to"] = _miss_body(6.2)
+    with pytest.raises(EmbodimentFault, match="strict_reach=false"):
+        body.step(Action(data=BOTTOM_RIGHT))
+
+
+def test_virtual_medium_carries_on_from_the_measured_pose_after_a_miss(gateway, camera):
+    body = _embodiment(gateway, camera, "easel", medium="virtual", overhead_url=None, strict_reach=False,
+                       state_tool="arm.state")
+    e = calib.easel()
+    body.reset(SCENE)
+    body.step(Action(data=np.array([0.02, 0.10, 0.002])))
+    # the next move misses; arm.state then reports the arm 4 mm short of the target
+    short = e.canvas_to_base([0.116, 0.10, 0.002])
+    gateway.script["arm.move_to"] = _miss_body(4.0)
+    gateway.script["arm.state"] = (200, allow_body("arm.state", {"eef_mm": {"x": short[0], "y": short[1], "z": short[2]}}))
+    obs = body.step(Action(data=np.array([0.12, 0.10, 0.002]))).observation
+    assert obs.extra["misses"] == 1
+    assert obs.state["eef_pos"] == pytest.approx([0.116, 0.10, 0.002], abs=1e-6)
+    ink = obs.images["overhead"][:, :, 0] < 128
+    cols = np.nonzero(ink)[1]
+    assert cols.min() == pytest.approx(80, abs=3) and cols.max() == pytest.approx(464, abs=3)  # inked to where it got, not where it was sent
