@@ -408,7 +408,7 @@ def sacramento_photo_spec() -> ReferenceSpec:
             "the valley and mountains on the horizon."
         ),
         photo=PHOTO_FILE,
-        photo_credit="",
+        photo_credit="open-source photograph; no attribution required",
         base_dir=str(_assets_dir()),
         strokes=strokes,
         landmarks={

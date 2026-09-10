@@ -183,7 +183,7 @@ for real through the gateway (signed receipts and all); after each pen-down
 move the adapter asks `arm.state` where the tip actually is and inks the
 segment on a canonical canvas. That canvas is the `overhead` frame (marked
 `canonical_canvas`, nothing to rectify), and every score is labelled
-`medium=virtual`, never comparable with a mark on paper.
+`medium=virtual`: its own leaderboard category, never ranked against a mark on paper.
 
 ```bash
 sacpaint run --policy sacpaint_trace --embodiment opencastor --no-rerun --no-prompt \

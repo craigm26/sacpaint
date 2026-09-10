@@ -30,7 +30,7 @@ a camera. ``-E medium=virtual`` is for a rig with no paper and no pen: the arm
 makes every motion for real through the gateway, and the "ink" is drawn from
 where the arm *measured* its tip after each pen-down move. That frame is a
 canonical canvas (nothing to rectify), and every score it produces is labelled
-``medium=virtual`` so it is never mistaken for a mark on paper. Pair it with
+``medium=virtual``: its own leaderboard category, never ranked against paper. Pair it with
 ``-E calibration=easel``, an upright sheet the arm can reach.
 """
 

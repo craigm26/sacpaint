@@ -30,7 +30,7 @@ from sacpaint.reference import DEFAULT_REFERENCE, INK_THRESHOLD, ReferenceSpec, 
 OVERHEAD = "overhead"
 CANONICAL_FLAG = "canonical_canvas"
 CORNERS_KEY = "canvas_corners"
-#: ``observation.extra["medium"]``: what the marks are made of. ``pen`` is the leaderboard medium;
+#: ``observation.extra["medium"]``: what the marks are made of; each medium is its own leaderboard category. ``pen`` is paper;
 #: ``virtual`` is ink synthesised from arm telemetry (no paper); ``sim`` is the mock world.
 MEDIUM_KEY = "medium"
 DEFAULT_MEDIUM = "pen"

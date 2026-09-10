@@ -121,14 +121,15 @@ the tower, dome and cupola dominate through their weights.
 
 ## Media
 
-Every score carries `medium`, what the marks were made of, so a number is
-never compared with one made differently:
+Every score carries `medium`, what the marks were made of. Each medium is its
+own leaderboard category: a number is only ever ranked against numbers made
+the same way.
 
-| Medium | What it is | Leaderboard |
+| Medium | What it is | Category |
 |---|---|---|
-| `pen` | a pen on a sheet, photographed: the benchmark | yes |
-| `virtual` | no paper, no pen: the real arm moves, and the canvas is inked from where the arm *measured* its tip after each pen-down move (`-E medium=virtual` on the OpenCastor body) | no: a dry run of the arm and the policy, exact and unobstructed |
-| `sim` | the mock plotter | no |
+| `pen` | a pen on a sheet, photographed | the benchmark proper |
+| `virtual` | no paper, no pen: the real arm moves, and the canvas is inked from where the arm *measured* its tip after each pen-down move (`-E medium=virtual` on the OpenCastor body) | its own category: real arm, real policy, exact and unobstructed canvas |
+| `sim` | the mock plotter | development only, never ranked |
 
 Different media are the intended next axis of the benchmark, not a footnote:
 brush and watercolour on paper, marker, chalk, a plotter pen, each with its

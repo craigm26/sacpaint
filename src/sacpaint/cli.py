@@ -452,18 +452,21 @@ def cmd_worldevals_entry(args: argparse.Namespace) -> int:
     title="Sacramento PaintBench",
     description=(
         "Draw a fixed photograph of Sacramento (Tower Bridge over the Capitol dome) with a pen "
-        "from camera feedback; scored offline against its traced landmarks: geometry, structure, discipline."
+        "from camera feedback; scored offline against its traced landmarks: geometry, structure, discipline. "
+        "Every score carries a medium (pen on paper, or virtual: a real arm inking from its own telemetry); "
+        "each medium is ranked as its own category."
     ),
     repo="https://github.com/craigm26/sacpaint",
     install="pip install sacpaint",
     task_keys=({names},),
-    tags=("drawing", "single-arm", "visual-feedback", "manipulation"),
+    tags=("drawing", "single-arm", "visual-feedback", "manipulation", "media-categories"),
     bimanual=False,
     contributors=("craigm26",),
     status="alpha",
 ),''')
     print("\n# Add this to src/worldevals/catalog.py in a fork of github.com/robocurve/worldevals,")
-    print("# run `uv run pytest`, and open a pull request. Attach a `sacpaint export` bundle of one real run.")
+    print("# run `uv run pytest`, and open a pull request. Attach a `sacpaint export` bundle of one real run")
+    print("# (a medium=virtual run counts: it is a real arm, ranked in its own category).")
     return 0
 
 
