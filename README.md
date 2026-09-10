@@ -1,8 +1,10 @@
 # Sacramento PaintBench moved into OpenCastor
 
 This benchmark now lives inside the OpenCastor runtime as `castor bench sacpaint`
-(import name `castor.bench.sacpaint`). The last standalone release was
-`sacpaint 0.3.1` on PyPI; everything after it is in
+(import name `castor.bench.sacpaint`). The last standalone release was `sacpaint 0.3.1` on PyPI. From 0.4.0 the PyPI
+package `sacpaint` is a pointer: it contains no code and only depends on
+`opencastor[paintbench]`, so `pip install sacpaint` still installs the benchmark
+(`import sacpaint` no longer works; use `castor.bench.sacpaint`). Everything lives in
 [craigm26/OpenCastor](https://github.com/craigm26/OpenCastor).
 
 ```bash

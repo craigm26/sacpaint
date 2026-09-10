@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sacpaint"
+version = "0.4.0"
+description = "Sacramento PaintBench moved into OpenCastor: this package only depends on opencastor[paintbench] (castor bench sacpaint)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Craig Merry" }]
+keywords = ["robotics", "benchmark", "inspect-robots", "evaluation", "opencastor"]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = ["opencastor[paintbench]>=1!3.3.0"]
+
+[project.urls]
+Homepage = "https://github.com/craigm26/OpenCastor"
+Documentation = "https://github.com/craigm26/OpenCastor/blob/main/docs/benchmarks/sacpaint.md"
+
+[tool.setuptools]
+packages = []
